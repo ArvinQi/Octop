@@ -11,7 +11,7 @@ from harness_agent.compaction import CompactResult
 from octop.config import OctopConfig
 from octop.infra.agents.manager import AgentManager
 from octop.infra.db.migrate import run_migrations
-from octop.infra.db.pool import DBPool
+from octop.infra.db.pool import SqlitePool
 from octop.infra.db.repos.agents import AgentRepo
 from octop.infra.db.repos.sessions import SessionRepo
 from octop.infra.db.repos.threads import ThreadRepo
@@ -24,16 +24,18 @@ from octop.infra.gateway.threads import ThreadRegistry
 from octop.infra.utils.paths import PathLayout
 
 
-def _agent_manager(tmp_path: Path, db: DBPool) -> AgentManager:
+def _agent_manager(tmp_path: Path, db: SqlitePool) -> AgentManager:
     services = build_shared_services(db=db, paths=PathLayout(tmp_path), config=OctopConfig())
     manager = AgentManager(repos=services.repos, paths=services.paths)
-    manager._harness_manager = MagicMock()
+    harness_mgr = MagicMock()
+    harness_mgr.get_thread_model.return_value = None
+    manager._harness_manager = harness_mgr
     return manager
 
 
 @pytest.fixture
 def ctx(tmp_path: Path) -> SlashCtx:
-    db = DBPool(tmp_path / "x.db")
+    db = SqlitePool(tmp_path / "x.db")
     run_migrations(db)
     UserRepo(db).create(username="u", password_hash="h", role="user")
     agent_repo = AgentRepo(db)
@@ -91,6 +93,33 @@ async def test_cmd_compact_calls_harness_without_reset(ctx, dispatcher) -> None:
     assert "12" in text
     assert "conversation_history" in text
     assert "/home/" not in text
+
+
+@pytest.mark.asyncio
+async def test_cmd_compact_uses_composer_model_ref(ctx, dispatcher) -> None:
+    await ctx.thread_registry.get_or_create_by_key(
+        session_key=ctx.session_key,
+        agent_id=ctx.agent_id,
+        user_id=ctx.user_id,
+        channel_type=ctx.channel_type,
+    )
+    tid = ctx.thread_registry.get_bound_thread_id(ctx.session_key)
+    assert tid
+    ctx.model_ref = "Tencent Cloud HAI/MiniMax-M2.7"
+    # Sticky /model must not beat the composer selection for this turn.
+    ctx.agent_manager._harness_manager.get_thread_model.return_value = "DeepSeek/deepseek-chat"
+    harness = MagicMock()
+    harness.acompact_conversation = AsyncMock(
+        return_value=CompactResult(ok=True, summarized_count=3, reason="ok")
+    )
+    ctx.agent_manager.get_agent = MagicMock(return_value=harness)
+
+    sink = BufferSink()
+    await cmd_compact(dispatcher, SlashCommand("compact", ""), ctx, sink)
+
+    assert harness.acompact_conversation.await_args.kwargs.get("model") == (
+        "Tencent Cloud HAI/MiniMax-M2.7"
+    )
 
 
 @pytest.mark.asyncio
