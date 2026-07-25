@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useParams, useLocation } from "react-router-dom";
 import { PanelLeftOpen, GraduationCap } from "lucide-react";
-import { Tooltip } from "antd";
+import { Tooltip, message as antMessage } from "antd";
 import { useIsMobile } from "../../hooks/useIsMobile";
 import { useChat } from "./hooks/useChat";
 import { useSessions } from "./hooks/useSessions";
@@ -12,7 +12,12 @@ import { formatRunUsage } from "./utils/chatMessages";
 import { useChatSidebarState } from "./hooks/useChatSidebarState";
 import { useChatHistoryRail } from "./hooks/useChatHistoryRail";
 import { useChatDockPanel } from "./hooks/useChatDockPanel";
-import { useChatSend } from "./hooks/useChatSend";
+import { useChatSend, type ChatSendOverrides } from "./hooks/useChatSend";
+import {
+  useChatMessageQueue,
+  type ChatQueueFlushContext,
+  type QueuedChatItem,
+} from "./hooks/useChatMessageQueue";
 import { useChatNavigation } from "./hooks/useChatNavigation";
 import { useChatSessionActions } from "./hooks/useChatSessionActions";
 
@@ -178,6 +183,7 @@ function ChatPageInner() {
     historyHasMore,
     historyLoadingMore,
     historyRefreshing,
+    historyHydrated,
     contextUsage,
     sendMessage,
     editAndResend,
@@ -364,18 +370,62 @@ function ChatPageInner() {
 
   // Wrap handleSend to intercept skill recording workflow keywords
   const wrappedHandleSend = useCallback(
-    (text: string, attachments?: ChatAttachment[]) => {
+    (
+      text: string,
+      attachments?: ChatAttachment[],
+      overrides?: ChatSendOverrides,
+    ) => {
       if (interceptUserMessage(text)) {
         // The workflow intercepted the message — don't send it to the agent
         return;
       }
-      handleSend(text, attachments);
+      handleSend(text, attachments, overrides);
     },
     [interceptUserMessage, handleSend],
   );
 
+  const flushQueuedItem = useCallback(
+    (item: QueuedChatItem, ctx: ChatQueueFlushContext): boolean => {
+      if (!ctx.threadId) {
+        antMessage.error(t("chat.queue.flushFailed"));
+        return false;
+      }
+      // Bypass skill-recording intercept — queued text must not be swallowed
+      // after it has already left the queue. Target the queued thread/agent so
+      // background streamEnd flushes do not send into the active session.
+      const ok = handleSend(item.text, item.attachments, {
+        composerContext: item.composerContext,
+        modelRef: item.modelRef,
+        selectedModel: item.composerContext?.model ?? item.modelRef ?? null,
+        selectedSkills: item.composerContext?.skills,
+        selectedConnectors: item.composerContext?.connectors,
+        selectedTargetAgents: item.composerContext?.targetAgents,
+        threadId: ctx.threadId,
+        agentId: ctx.agentId || undefined,
+      });
+      if (!ok) {
+        antMessage.error(t("chat.queue.flushFailed"));
+      }
+      return ok;
+    },
+    [handleSend, t],
+  );
+
   const {
-    handleNewChat,
+    items: queuedItems,
+    enqueue: enqueueQueued,
+    remove: removeQueued,
+    reclaim: reclaimQueued,
+    clear: clearQueued,
+  } = useChatMessageQueue({
+    agentId: resolvedAgentId,
+    threadId: activeThreadId,
+    isStreaming,
+    onFlush: flushQueuedItem,
+  });
+
+  const {
+    handleNewChat: startNewChat,
     handleSelectSession,
     navigateToAgent,
     handleDeleteSession,
@@ -393,6 +443,11 @@ function ChatPageInner() {
     resetNavForAgentSwitch,
     markInitialNavDone,
   });
+
+  const handleNewChat = useCallback(() => {
+    clearQueued();
+    startNewChat();
+  }, [clearQueued, startNewChat]);
 
   useEffect(() => {
     return chatStore.onSlashAction((ev) => {
@@ -478,6 +533,13 @@ function ChatPageInner() {
   );
 
   const hasMessages = messages.length > 0;
+  // On hard refresh / deep-link into a thread, messages start empty. Showing
+  // Welcome until history returns looks like a full page flash. Keep the list
+  // shell while that thread is still hydrating.
+  const awaitingThreadHistory = Boolean(
+    activeThreadId && !hasMessages && (historyLoading || !historyHydrated),
+  );
+  const showWelcome = !hasMessages && !awaitingThreadHistory;
 
   const chatSidebarPanel = (
     <ChatSidebarPanel
@@ -556,7 +618,7 @@ function ChatPageInner() {
                 noAgents={noAgents}
                 loading={agentsLoading}
               />
-            ) : !hasMessages && !historyLoading ? (
+            ) : showWelcome ? (
               <WelcomeScreen
                 agentName={activeAgent?.name ?? null}
                 welcomeSuffix={welcomeSuffix}
@@ -568,7 +630,7 @@ function ChatPageInner() {
               <MessageList
                 messages={messages}
                 composerLookups={composerLookups}
-                loading={historyLoading}
+                loading={awaitingThreadHistory}
                 historyHasMore={historyHasMore}
                 historyLoadingMore={historyLoadingMore}
                 historyRefreshing={historyRefreshing}
@@ -613,6 +675,10 @@ function ChatPageInner() {
           <ChatInput
             ref={chatInputRef}
             onSend={wrappedHandleSend}
+            onQueue={enqueueQueued}
+            queuedItems={queuedItems}
+            onRemoveQueued={removeQueued}
+            onReclaimQueued={reclaimQueued}
             onCancel={cancelStream}
             onNewChat={handleNewChat}
             isStreaming={isStreaming}
