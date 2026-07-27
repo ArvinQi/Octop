@@ -204,9 +204,7 @@ def test_migration_restore_preserves_current_users_and_imported_agents(
         )
 
         # The LightClaw source user must not appear in the target users table.
-        lc_row = conn.execute(
-            "SELECT id FROM users WHERE username = ?", ("lc_user",)
-        ).fetchone()
+        lc_row = conn.execute("SELECT id FROM users WHERE username = ?", ("lc_user",)).fetchone()
         assert lc_row is None, "lc_user from backup was not removed after user write-back"
 
     tgt_pool.close()
