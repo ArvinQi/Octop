@@ -35,7 +35,7 @@ _WORKSPACES_DIR = "workspaces"
 _MANIFEST_NAME = "manifest.json"
 _SQLITE_DB_ARC = f"{_DB_DIR}/octop.db"
 _PG_DUMP_ARC = f"{_DB_DIR}/octop.dump"
-
+_MIGRATION_VERSION_SUFFIX = "-migrated-from-lightclaw"
 
 def _timestamp() -> str:
     return datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
@@ -165,9 +165,6 @@ def _read_tar_members(data: bytes) -> dict[str, bytes]:
                 continue
             out[member.name.replace("\\", "/")] = extracted.read()
     return out
-
-
-_MIGRATION_VERSION_SUFFIX = "-migrated-from-lightclaw"
 
 
 def _is_migration_backup(manifest: BackupManifest) -> bool:
