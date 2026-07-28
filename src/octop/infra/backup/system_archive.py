@@ -37,6 +37,7 @@ _SQLITE_DB_ARC = f"{_DB_DIR}/octop.db"
 _PG_DUMP_ARC = f"{_DB_DIR}/octop.dump"
 _MIGRATION_VERSION_SUFFIX = "-migrated-from-lightclaw"
 
+
 def _timestamp() -> str:
     return datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
 
