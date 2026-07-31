@@ -1911,7 +1911,11 @@
     "description": "Manage runtime configuration and environment variables.",
     "search": {
       "desc": "Configure AI-powered web search providers to enable your assistant to search the internet. Each provider requires an API key from the respective service.",
-      "tip": "You can configure or modify search providers here. Changes take effect immediately on the next chat session."
+      "tip": "You can configure or modify search providers here. Changes take effect immediately on the next chat session.",
+      "sourceBuiltinTitle": "Current search source: built-in search",
+      "sourceBuiltinDesc": "When no third-party search provider is configured, Octop still provides its built-in search service. It requires no API key, but its stability and availability are not guaranteed. It switches automatically once a third-party provider is configured.",
+      "sourceConfiguredTitle": "Current search source: {{name}}",
+      "sourceConfiguredDesc": "A third-party search provider is configured, so the built-in search is no longer loaded by default, avoiding multiple search tools being exposed to the model at once."
     },
     "update": {
       "title": "Version & Updates",
