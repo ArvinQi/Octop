@@ -53,7 +53,8 @@
   border-bottom: none;
   background: var(--fn-bg-primary);
   color: var(--fn-text-primary);
-  overflow: hidden;
+  /* Visible so the hover edit control can sit just past the title. */
+  overflow: visible;
   z-index: 2;
 
   /* Inset divider — slight gap from the vertical rails (match dock toolbar). */
@@ -67,6 +68,12 @@
     background: var(--fn-chat-divider, var(--fn-border-primary));
     pointer-events: none;
   }
+
+  &:hover .chatTitleEditBtn,
+  &:focus-within .chatTitleEditBtn {
+    opacity: 1;
+    pointer-events: auto;
+  }
 }
 
 .chatTitleLeft {
@@ -74,18 +81,31 @@
   min-width: 0;
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 8px;
+  /* Keep room for the trailing more button so the title stays visually centered. */
+  padding: 0 36px;
 }
 
 .chatTitleLeadingIcon {
   flex-shrink: 0;
   color: var(--fn-text-tertiary);
+  opacity: 0.7;
+}
+
+.chatTitleHeading {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .chatTitleText {
   margin: 0;
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 6px;
   max-width: 100%;
   font-size: 14px;
@@ -95,12 +115,53 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  text-align: left;
+  text-align: center;
 }
 
 .chatTitlePinMark {
   flex-shrink: 0;
   color: var(--fn-text-tertiary);
+}
+
+.chatTitleEditBtn {
+  position: absolute;
+  left: calc(100% + 4px);
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fn-text-secondary);
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity var(--fn-transition-fast, 0.15s ease),
+    color var(--fn-transition-fast, 0.15s ease),
+    background var(--fn-transition-fast, 0.15s ease);
+
+  &:hover {
+    color: var(--fn-text-primary);
+    background: var(--fn-bg-secondary);
+  }
+
+  &:focus-visible {
+    opacity: 1;
+    pointer-events: auto;
+    outline: 2px solid var(--fn-color-brand);
+    outline-offset: 2px;
+  }
+
+  @media (hover: none) {
+    opacity: 1;
+    pointer-events: auto;
+  }
 }
 
 .chatTitleInput {
@@ -113,6 +174,7 @@
   color: var(--fn-text-primary);
   font-size: 14px;
   font-weight: 500;
+  text-align: center;
   outline: none;
 
   &:focus {
@@ -122,10 +184,15 @@
 }
 
 .chatTitleActions {
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
   display: flex;
   align-items: center;
   gap: 2px;
   flex-shrink: 0;
+  z-index: 1;
 }
 
 .chatTitleIconBtn {
