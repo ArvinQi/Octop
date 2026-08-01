@@ -85,7 +85,7 @@ Octop 安装脚本 (macOS / Linux)
   --from-source [目录]  从源码安装；未指定目录时从 git 仓库克隆
   --from-pypi           从 PyPI 安装（默认）
   --extras <附加组件>   额外可选组件（例如 desktop）；browser/playwright 默认安装
-  --mirror <镜像URL>    指定 PyPI 镜像（例如 https://mirrors.aliyun.com/pypi/simple）
+  --mirror <镜像URL>    指定 PyPI 镜像（例如 https://mirrors.cloud.tencent.com/pypi/simple）
   -h, --help            显示此帮助
 
 说明: 若系统已安装 Chrome/Chromium（常见于 macOS/Windows 或 Linux 桌面），
