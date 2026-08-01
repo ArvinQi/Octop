@@ -105,8 +105,8 @@ async def _resolve_validated_ip(url: str) -> str:
     if not infos:
         raise UnsafeOutboundUrl(f"cannot resolve hostname {host!r}")
     for info in infos:
-        _check_resolved_ip(typing.cast(str, info[4][0]))
-    return typing.cast(str, infos[0][4][0])
+        _check_resolved_ip(info[4][0])
+    return infos[0][4][0]
 
 
 class _PinnedNetworkBackend(AutoBackend):
