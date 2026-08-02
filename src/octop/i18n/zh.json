@@ -290,6 +290,7 @@
     "LOGIN_LOCKED": "登录失败次数过多，请 {minutes} 分钟后再试。",
     "USERNAME_TAKEN": "用户名已被占用。",
     "AGENT_NOT_FOUND": "未找到 Agent。",
+    "AGENT_NOT_RUNNING": "此专家未启用。",
     "AGENT_FAILED": "Agent 启动失败。",
     "AGENT_BUSY": "Agent 正忙。",
     "AGENT_NAME_TAKEN": "该名称已被使用，请换一个名称。",

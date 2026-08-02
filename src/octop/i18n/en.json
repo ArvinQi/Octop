@@ -290,6 +290,7 @@
     "LOGIN_LOCKED": "Too many failed sign-in attempts. Try again in {minutes} minutes.",
     "USERNAME_TAKEN": "Username is already taken.",
     "AGENT_NOT_FOUND": "Agent not found.",
+    "AGENT_NOT_RUNNING": "This expert is not enabled.",
     "AGENT_FAILED": "Agent failed to start.",
     "AGENT_BUSY": "Agent is busy.",
     "AGENT_NAME_TAKEN": "This name is already in use. Please choose another.",

@@ -6,14 +6,17 @@
 
 ## [Unreleased]
 
+## [0.9.17] - 2026-07-31
+
 ### 新增
 - 全局技能包：实例级可复用技能集合，支持挂载到专家、从 SkillHub 导入技能集，以及本地 ZIP / URL 导入技能
 - 个性化页整合技能 / 子专家 / 频道 / MBTI / 记忆；技能包管理页支持移动端列表详情切换
 - 搜索设置页显性展示当前搜索源：未配置第三方服务时提示使用内置搜索（免 API Key，不保证稳定），配置后展示实际使用的服务 (#109)
 
 ### 变更
-- 技能相关域逻辑迁至 `infra/skills/`；数据库迁移合并为 schema v2（cron MCP + skill_packages 含图标）
-- 备份/恢复纳入 `skill-packages/` 目录，恢复前清空避免残留
+- 技能相关域逻辑迁至 `infra/skills/`；数据库迁移合并为 schema v2（cron MCP + skill_packages 含图标）(#108)
+- 备份/恢复纳入 `skill-packages/` 目录，恢复前清空避免残留 (#108)
+- 统一聊天生成中 / 滚动辅助逻辑；antd message 经 App.useApp 绑定，支持主题感知 toast (#119)
 
 ## [0.9.16] - 2026-07-29
 

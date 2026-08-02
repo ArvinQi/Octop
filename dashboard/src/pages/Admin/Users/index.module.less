@@ -25,50 +25,117 @@
 
 /* ── Create-user modal ──────────────────────────────────────────── */
 
-.formSelectAffix {
+.createUserModal {
+  :global(.ant-modal-body) {
+    padding-top: 12px;
+  }
+}
+
+.createUserForm {
+  :global(.ant-form-item) {
+    margin-bottom: 16px;
+  }
+
+  :global(.ant-form-item-label > label) {
+    color: var(--fn-text-secondary);
+    font-weight: 500;
+  }
+}
+
+.createUserRoleItem {
+  margin-bottom: 4px !important;
+}
+
+.rolePicker {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  width: 100%;
+
+  @media (max-width: 480px) {
+    grid-template-columns: 1fr;
+  }
+}
+
+.roleOption {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
   width: 100%;
-  min-height: 32px;
-  padding: 0 11px;
-  border: 1px solid var(--ant-color-border, #d9d9d9);
-  border-radius: 6px;
-  background: var(--ant-color-bg-container, #fff);
+  min-height: 0;
+  padding: 8px 10px;
+  text-align: left;
+  border: 1px solid var(--fn-border-primary);
+  border-radius: var(--fn-radius-md, 8px);
+  background: var(--fn-bg-elevated, var(--fn-bg-primary));
+  color: var(--fn-text-primary);
+  cursor: pointer;
   transition:
-    border-color 0.2s,
-    box-shadow 0.2s;
+    border-color 0.15s ease,
+    background 0.15s ease,
+    box-shadow 0.15s ease;
 
   &:hover {
-    border-color: var(--ant-color-primary-hover, #4096ff);
+    border-color: var(--fn-border-strong, var(--fn-border-primary));
+    background: var(--fn-bg-secondary, var(--fn-bg-elevated));
   }
 
-  &:focus-within {
-    border-color: var(--ant-color-primary, #1677ff);
-    box-shadow: 0 0 0 2px
-      color-mix(in srgb, var(--ant-color-primary, #1677ff) 20%, transparent);
+  &:focus-visible {
+    outline: 2px solid var(--fn-color-brand, #4f6ef7);
+    outline-offset: 2px;
   }
 }
 
-.formSelectAffixIcon {
+.roleOptionSelected {
+  box-shadow: 0 0 0 1px var(--role-accent);
+  border-color: var(--role-accent);
+  background: color-mix(in srgb, var(--role-accent) 10%, var(--fn-bg-elevated, var(--fn-bg-primary)));
+
+  &:hover {
+    border-color: var(--role-accent);
+    background: color-mix(in srgb, var(--role-accent) 14%, var(--fn-bg-elevated, var(--fn-bg-primary)));
+  }
+}
+
+.roleOptionAdmin {
+  --role-accent: #d4880e;
+}
+
+.roleOptionUser {
+  --role-accent: #4f6ef7;
+}
+
+.roleOptionIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
   flex-shrink: 0;
-  color: var(--fn-text-tertiary);
+  border-radius: 7px;
+  color: var(--role-accent);
+  background: color-mix(in srgb, var(--role-accent) 14%, transparent);
 }
 
-.formSelectAffixControl {
-  flex: 1;
+.roleOptionBody {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
   min-width: 0;
+  padding-top: 0;
+}
 
-  :global(.ant-select-selector) {
-    padding-inline: 0 !important;
-    border: none !important;
-    box-shadow: none !important;
-    background: transparent !important;
-  }
+.roleOptionLabel {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.25;
+  color: var(--fn-text-primary);
+}
 
-  &:global(.ant-select-focused) :global(.ant-select-selector) {
-    box-shadow: none !important;
-  }
+.roleOptionHint {
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--fn-text-tertiary);
 }
 
 /* ── Card shell ─────────────────────────────────────────────────── */

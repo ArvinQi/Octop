@@ -25,9 +25,16 @@ import {
 import { useTranslation } from "react-i18next";
 import PageShell from "../../../layouts/PageShell";
 import { useIsMobile } from "../../../hooks/useIsMobile";
+import { useUserRole } from "../../../hooks/useUserRole";
 import { request } from "../../../api/request";
 import { useAgent } from "../../../context/AgentContext";
 import styles from "./index.module.less";
+
+interface UsageUserOption {
+  id: number;
+  username: string;
+  display_name: string | null;
+}
 
 interface UsageBucket {
   key: string;
@@ -137,10 +144,20 @@ function fetchSummary(
   windowKey: string,
   granularity: string,
   agentFilter: string | "all",
+  userFilter: number | "all" | null,
 ): Promise<UsageSummary> {
   const params = new URLSearchParams({ window: windowKey, granularity });
   if (agentFilter !== "all") {
     params.set("agent_id", agentFilter);
+  }
+  // Admin scope: null means role still loading (fall back to self endpoint);
+  // "all" → global roll-up; number → that user's roll-up.
+  if (userFilter === "all") {
+    return request<UsageSummary>(`/admin/usage/summary?${params}`);
+  }
+  if (typeof userFilter === "number") {
+    params.set("user_id", String(userFilter));
+    return request<UsageSummary>(`/admin/usage/summary?${params}`);
   }
   return request<UsageSummary>(`/usage/summary?${params}`);
 }
@@ -607,10 +624,14 @@ function DimensionView({
 export default function TokenUsagePage() {
   const { t } = useTranslation();
   const { agents } = useAgent();
+  const role = useUserRole();
+  const isAdmin = role === "admin";
   const isMobile = useIsMobile();
   const [windowKey, setWindowKey] = useState("last_30d");
   const [view, setView] = useState<ViewMode>("summary");
   const [agentFilter, setAgentFilter] = useState<string | "all">("all");
+  const [userFilter, setUserFilter] = useState<number | "all">("all");
+  const [users, setUsers] = useState<UsageUserOption[]>([]);
 
   const [totals, setTotals] = useState<UsageSummary | null>(null);
   const [dimBuckets, setDimBuckets] = useState<UsageBucket[]>([]);
@@ -629,6 +650,9 @@ export default function TokenUsagePage() {
     return map;
   }, [agents]);
 
+  // Admin-only: null while role unknown so we don't hit /admin before ready.
+  const adminUserFilter: number | "all" | null = isAdmin ? userFilter : null;
+
   const windowOptions = useMemo(
     () => [
       { value: "today", label: t("tokenUsage.today") },
@@ -638,6 +662,17 @@ export default function TokenUsagePage() {
       { value: "all", label: t("tokenUsage.allTime") },
     ],
     [t],
+  );
+
+  const userOptions = useMemo(
+    () => [
+      { value: "all" as const, label: t("tokenUsage.allUsers") },
+      ...users.map((u) => ({
+        value: u.id,
+        label: u.display_name?.trim() || u.username,
+      })),
+    ],
+    [users, t],
   );
 
   const agentOptions = useMemo(
@@ -658,15 +693,36 @@ export default function TokenUsagePage() {
     [t],
   );
 
+  useEffect(() => {
+    if (!isAdmin) {
+      setUsers([]);
+      return;
+    }
+    let cancelled = false;
+    void request<UsageUserOption[]>("/users")
+      .then((rows) => {
+        if (!cancelled) setUsers(rows);
+      })
+      .catch(() => {
+        if (!cancelled) setUsers([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isAdmin]);
+
   const refresh = useCallback(async () => {
+    // Wait for role resolution before the first admin-scoped fetch so we
+    // don't briefly show the caller's private totals then jump to global.
+    if (role === null) return;
     setLoading(true);
     setError(null);
     try {
       if (view === "summary") {
         const [expertRes, modelRes, dayRes] = await Promise.all([
-          fetchSummary(windowKey, "by_agent", agentFilter),
-          fetchSummary(windowKey, "by_model", agentFilter),
-          fetchSummary(windowKey, "by_day", agentFilter),
+          fetchSummary(windowKey, "by_agent", agentFilter, adminUserFilter),
+          fetchSummary(windowKey, "by_model", agentFilter, adminUserFilter),
+          fetchSummary(windowKey, "by_day", agentFilter, adminUserFilter),
         ]);
         setTotals(expertRes);
         setSummaryExpert(resolveAgentLabels(expertRes.buckets, agentNameById));
@@ -674,7 +730,12 @@ export default function TokenUsagePage() {
         setSummaryDay(dayRes.buckets);
         setDimBuckets([]);
       } else {
-        const res = await fetchSummary(windowKey, view, agentFilter);
+        const res = await fetchSummary(
+          windowKey,
+          view,
+          agentFilter,
+          adminUserFilter,
+        );
         setTotals(res);
         const buckets =
           view === "by_agent"
@@ -687,7 +748,7 @@ export default function TokenUsagePage() {
     } finally {
       setLoading(false);
     }
-  }, [view, windowKey, agentFilter, agentNameById]);
+  }, [view, windowKey, agentFilter, adminUserFilter, agentNameById, role]);
 
   useEffect(() => {
     void refresh();
@@ -710,6 +771,17 @@ export default function TokenUsagePage() {
             />
           </div>
           <div className={styles.toolbarFilters}>
+            {isAdmin && (
+              <Select
+                value={userFilter}
+                onChange={(v) => setUserFilter(v)}
+                className={styles.toolbarFilterSelect}
+                style={{ width: isMobile ? undefined : 160 }}
+                options={userOptions}
+                showSearch
+                optionFilterProp="label"
+              />
+            )}
             <Select
               value={windowKey}
               onChange={setWindowKey}
@@ -737,7 +809,7 @@ export default function TokenUsagePage() {
             </Card>
           )}
 
-          {loading && !totals ? (
+          {(loading || role === null) && !totals ? (
             <div className={styles.loadingWrap}>
               <Spin />
             </div>

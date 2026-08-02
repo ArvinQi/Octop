@@ -1,7 +1,15 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Button, Tooltip } from "antd";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Dropdown } from "antd";
+import type { MenuProps } from "antd";
 import { useTranslation } from "react-i18next";
-import { PanelBottom, PanelRight, PictureInPicture2, X } from "lucide-react";
+import {
+  Check,
+  MoreVertical,
+  PanelBottom,
+  PanelRight,
+  PictureInPicture2,
+  X,
+} from "lucide-react";
 import { beginPointerDragSession } from "../../hooks/usePointerDragSession";
 import type { PanelMode } from "./index";
 import styles from "./ChatBrowserPanel.module.less";
@@ -89,7 +97,8 @@ const ChatDockPanelShell: React.FC<ChatDockPanelShellProps> = ({
         target.closest("input") ||
         target.closest("a") ||
         target.closest('[role="button"]') ||
-        target.closest(".ant-select") ||
+        target.closest('[role="tab"]') ||
+        target.closest(".octop-select, .ant-select") ||
         target.closest(".ant-segmented") ||
         target.closest(`.${styles.popupResizeHandle}`)
       ) {
@@ -238,6 +247,33 @@ const ChatDockPanelShell: React.FC<ChatDockPanelShellProps> = ({
         }
       : style;
 
+  const layoutMenuItems: MenuProps["items"] = useMemo(
+    () => [
+      {
+        key: "bottom",
+        label: t("browserWorkspace.panelBottom"),
+        icon: <PanelBottom size={14} />,
+        extra: mode === "bottom" ? <Check size={14} /> : undefined,
+        onClick: () => onModeChange("bottom"),
+      },
+      {
+        key: "right",
+        label: t("browserWorkspace.panelRight"),
+        icon: <PanelRight size={14} />,
+        extra: mode === "right" ? <Check size={14} /> : undefined,
+        onClick: () => onModeChange("right"),
+      },
+      {
+        key: "popup",
+        label: t("browserWorkspace.panelPopup"),
+        icon: <PictureInPicture2 size={14} />,
+        extra: mode === "popup" ? <Check size={14} /> : undefined,
+        onClick: () => onModeChange("popup"),
+      },
+    ],
+    [mode, onModeChange, t],
+  );
+
   const panel = (
     <div
       ref={panelRef}
@@ -255,49 +291,28 @@ const ChatDockPanelShell: React.FC<ChatDockPanelShellProps> = ({
         {toolbarActions ? (
           <div className={styles.toolbarActions}>{toolbarActions}</div>
         ) : null}
-        <div className={styles.toolbarDivider} aria-hidden />
         <div className={styles.toolbarModes}>
-          <Tooltip title={t("browserWorkspace.panelBottom")}>
-            <Button
-              type="text"
-              size="small"
-              icon={<PanelBottom size={14} />}
-              className={`${styles.toolbarIconBtn} ${
-                mode === "bottom" ? styles.modeActive : ""
-              }`}
-              onClick={() => onModeChange("bottom")}
-            />
-          </Tooltip>
-          <Tooltip title={t("browserWorkspace.panelRight")}>
-            <Button
-              type="text"
-              size="small"
-              icon={<PanelRight size={14} />}
-              className={`${styles.toolbarIconBtn} ${
-                mode === "right" ? styles.modeActive : ""
-              }`}
-              onClick={() => onModeChange("right")}
-            />
-          </Tooltip>
-          <Tooltip title={t("browserWorkspace.panelPopup")}>
-            <Button
-              type="text"
-              size="small"
-              icon={<PictureInPicture2 size={14} />}
-              className={`${styles.toolbarIconBtn} ${
-                mode === "popup" ? styles.modeActive : ""
-              }`}
-              onClick={() => onModeChange("popup")}
-            />
-          </Tooltip>
-          <Button
-            type="text"
-            size="small"
-            icon={<X size={14} />}
+          <Dropdown
+            menu={{ items: layoutMenuItems, selectedKeys: [mode] }}
+            trigger={["click"]}
+            placement="bottomRight"
+          >
+            <button
+              type="button"
+              className={styles.toolbarIconBtn}
+              aria-label={t("browserWorkspace.panelLayout", "面板布局")}
+            >
+              <MoreVertical size={16} strokeWidth={1.8} />
+            </button>
+          </Dropdown>
+          <button
+            type="button"
             className={styles.toolbarIconBtn}
             onClick={onClose}
             aria-label={t("common.close", "关闭")}
-          />
+          >
+            <X size={14} strokeWidth={1.8} />
+          </button>
         </div>
       </div>
       {children}
