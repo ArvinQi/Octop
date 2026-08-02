@@ -3,7 +3,6 @@ import { Dropdown } from "antd";
 import type { MenuProps } from "antd";
 import { useTranslation } from "react-i18next";
 import {
-  MessageSquare,
   MoreVertical,
   Pin,
   PinOff,
@@ -12,6 +11,7 @@ import {
 } from "lucide-react";
 import { showConfirmModal } from "../../../utils/confirmModal";
 import type { Session } from "../hooks/useSessions";
+import SessionChannelIcon from "./SessionChannelIcon";
 import styles from "../index.module.less";
 
 interface ChatTitleBarProps {
@@ -66,12 +66,6 @@ export default function ChatTitleBar({
         onClick: () => onPin(session.id, !session.pinned),
       },
       {
-        key: "rename",
-        label: t("common.rename"),
-        icon: <Pencil size={14} />,
-        onClick: () => setIsEditing(true),
-      },
-      {
         key: "delete",
         label: t("common.delete"),
         icon: <Trash2 size={14} />,
@@ -95,11 +89,10 @@ export default function ChatTitleBar({
   return (
     <div className={styles.chatTitleBar}>
       <div className={styles.chatTitleLeft}>
-        <MessageSquare
+        <SessionChannelIcon
+          channelType={session.channelType}
           size={16}
-          strokeWidth={2}
           className={styles.chatTitleLeadingIcon}
-          aria-hidden
         />
         {isEditing ? (
           <input
@@ -117,17 +110,28 @@ export default function ChatTitleBar({
             }}
           />
         ) : (
-          <h1 className={styles.chatTitleText} title={title}>
-            {title}
-            {session.pinned ? (
-              <Pin
-                size={13}
-                strokeWidth={2}
-                className={styles.chatTitlePinMark}
-                aria-hidden
-              />
-            ) : null}
-          </h1>
+          <div className={styles.chatTitleHeading}>
+            <h1 className={styles.chatTitleText} title={title}>
+              {title}
+              {session.pinned ? (
+                <Pin
+                  size={13}
+                  strokeWidth={2}
+                  className={styles.chatTitlePinMark}
+                  aria-hidden
+                />
+              ) : null}
+            </h1>
+            <button
+              type="button"
+              className={styles.chatTitleEditBtn}
+              onClick={() => setIsEditing(true)}
+              aria-label={t("common.edit")}
+              title={t("common.edit")}
+            >
+              <Pencil size={14} strokeWidth={2} aria-hidden />
+            </button>
+          </div>
         )}
       </div>
 
