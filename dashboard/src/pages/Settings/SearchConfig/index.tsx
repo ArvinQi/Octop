@@ -309,6 +309,9 @@ export default function SearchConfigPage() {
     return 0;
   });
 
+  const configuredProviders = providers.filter((p) => p.configured);
+  const activeSourceName = configuredProviders[0]?.name;
+
   if (loading) {
     return (
       <div
@@ -333,6 +336,39 @@ export default function SearchConfigPage() {
         message={t("advancedSettings.search.tip")}
         style={{ fontSize: 13 }}
       />
+
+      {configuredProviders.length === 0 ? (
+        <Alert
+          type="info"
+          showIcon
+          icon={<Search size={16} />}
+          message={t(
+            "advancedSettings.search.sourceBuiltinTitle",
+            "当前搜索源：内置搜索",
+          )}
+          description={t(
+            "advancedSettings.search.sourceBuiltinDesc",
+            "未配置第三方搜索服务时，仍可使用产品内置搜索服务；该服务无需 API Key，但不保证稳定性和可用性。配置第三方服务后会自动切换。",
+          )}
+          style={{ fontSize: 13 }}
+        />
+      ) : (
+        <Alert
+          type="success"
+          showIcon
+          icon={<CheckCircle size={16} />}
+          message={t(
+            "advancedSettings.search.sourceConfiguredTitle",
+            "当前搜索源：{{name}}",
+            { name: activeSourceName },
+          )}
+          description={t(
+            "advancedSettings.search.sourceConfiguredDesc",
+            "已配置第三方搜索服务，内置搜索默认不再加载，避免多个搜索工具同时暴露给模型。",
+          )}
+          style={{ fontSize: 13 }}
+        />
+      )}
 
       <Collapse
         accordion
