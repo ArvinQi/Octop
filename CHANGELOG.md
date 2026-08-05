@@ -9,6 +9,7 @@
 ### 新增
 - 高级设置「更新」页提供按安装方式升级说明与一键检查升级双栏布局
 - 高级设置 HTTPS 页优化签发状态与预检结果展示
+- 401 会话过期时通过 React Router 跳转登录，避免整页 reload 导致 lazy chunk 白屏
 - 聊天历史 API 返回 ``turn_active``，重连客户端可据此 re-subscribe WebSocket 恢复流式输出
 - 局部 ``root_dir`` 下 Linux bubblewrap execute jail（``POST /api/filesystem/ensure-bwrap``、仪表盘 root 目录树 mkdir/rename）
 - 虚拟工作区路径 I/O：host 绝对路径经 ``file://`` 与 ``BackendWorkspace`` failback 对齐
