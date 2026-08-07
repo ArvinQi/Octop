@@ -23,6 +23,7 @@ from octop.infra.backend.resolver import (
     backend_spec_supports_execution,
     default_agent_backend_spec,
     resolve_agent_backend_spec,
+    windows_neutralize_host_root,
 )
 from octop.infra.connectors.builder import (
     build_mcp_server_configs_for_user,
@@ -1515,13 +1516,16 @@ class AgentManager:
     def _backend_spec_for_row(self, row: AgentRow) -> Any:
         cfg = self._agent_config_dict(row)
         backend_spec = cfg.get("backend")
+        workspace_dir = self._paths.ensure_agent_workspace(row.agent_id)
         if backend_spec is None:
-            workspace_dir = self._paths.ensure_agent_workspace(row.agent_id)
             return default_agent_backend_spec(workspace_dir)
-        return resolve_agent_backend_spec(
+        resolved = resolve_agent_backend_spec(
             backend_spec,
             repo=self._repos.storage_backend_repo,
         )
+        # Windows: the dashboard defaults local backends to root_dir "/", which
+        # resolves to a drive other than the workspace and breaks path checks.
+        return windows_neutralize_host_root(resolved, workspace_dir=workspace_dir)
 
     def _backend_workspace_for_row(self, row: AgentRow) -> Any:
         """Resolve :class:`BackendWorkspace` for *row* without a running harness agent."""

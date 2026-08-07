@@ -6,6 +6,9 @@
 
 ## [Unreleased]
 
+### 修复
+- Windows 下新建 agent 时，本地后端 `root_dir:"/"` 被解析为当前盘根目录，导致读取工作区（通常位于另一盘符）时抛 `Path ... outside root directory`；现在后端规格解析会在 Windows 上将主机根 `/` 归一化为工作区作用域默认值
+
 ## [0.9.19] - 2026-08-05
 
 ### 新增

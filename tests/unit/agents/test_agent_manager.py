@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -436,6 +437,22 @@ def test_build_harness_config_respects_config_json_backend(manager: AgentManager
         _row(config_json=json.dumps({"backend": custom})),
     )
     assert cfg.backend == custom
+
+
+def test_backend_spec_for_row_neutralizes_host_root_on_windows(
+    manager: AgentManager, monkeypatch: Any
+) -> None:
+    # The dashboard persists local backends with root_dir "/" (host-root sentinel).
+    # On Windows that resolves to the current-drive root, breaking cross-drive reads
+    # of the workspace; the resolver must scope it to the workspace default.
+    monkeypatch.setattr(os, "name", "nt")
+    row = _row(
+        config_json=json.dumps(
+            {"backend": {"type": "local_shell", "root_dir": "/", "virtual_mode": True}}
+        )
+    )
+    ws = manager._paths.ensure_agent_workspace(row.agent_id)
+    assert manager._backend_spec_for_row(row) == default_agent_backend_spec(ws)
 
 
 def test_build_harness_config_omits_fs_permissions_for_local_shell(manager: AgentManager) -> None:
