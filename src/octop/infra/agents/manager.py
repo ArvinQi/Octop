@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import shutil
 from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
@@ -440,6 +441,12 @@ class AgentManager:
         """Remove agent from DB, harness runtime, and workspace directory."""
         async with self._lock:
             await self._harness_manager.aremove_agent(agent_id)  # type: ignore[union-attr]
+        workspace_dir = self._paths.agent_workspace(agent_id)
+        try:
+            if workspace_dir.exists():
+                shutil.rmtree(workspace_dir)
+        except OSError:
+            logger.exception("rmtree failed for %s; agent removed from DB anyway", workspace_dir)
         self._repos.agent_repo.delete(agent_id)
         self._repos.audit_repo.write(actor=ACTOR_SYSTEM, action="agent.delete", target=agent_id)
 

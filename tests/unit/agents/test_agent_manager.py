@@ -415,6 +415,51 @@ async def test_reload_agent_clears_bootstrap_refresh_pending(manager: AgentManag
     harness_manager.aremove_agent.assert_awaited_once_with(agent_id)
 
 
+@pytest.mark.asyncio
+async def test_delete_removes_workspace_directory(manager: AgentManager) -> None:
+    """Deleting an agent must clean up its workspace directory on disk."""
+    agent_id = "AGT_DELETE_WS"
+    manager._repos.agent_repo.create(agent_id=agent_id, user_id=None, name="delete-ws")
+
+    workspace_dir = manager._paths.ensure_agent_workspace(agent_id)
+    assert workspace_dir.is_dir()
+    (workspace_dir / "MEMORY.md").write_text("old memory", encoding="utf-8")
+
+    harness_manager = MagicMock()
+    harness_manager.aremove_agent = AsyncMock()
+    manager._harness_manager = harness_manager
+
+    await manager.delete(agent_id)
+
+    harness_manager.aremove_agent.assert_awaited_once_with(agent_id)
+    assert manager.get_row(agent_id) is None
+    assert not workspace_dir.exists()
+
+
+@pytest.mark.asyncio
+async def test_delete_keeps_db_row_when_workspace_rmtree_fails(
+    manager: AgentManager, monkeypatch: Any
+) -> None:
+    """A failed workspace rmtree must not abort agent deletion (mirrors user removal)."""
+    import shutil
+
+    agent_id = "AGT_DELETE_ERR"
+    manager._repos.agent_repo.create(agent_id=agent_id, user_id=None, name="delete-err")
+
+    def _fail_rmtree(path: object) -> None:
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(shutil, "rmtree", _fail_rmtree)
+
+    harness_manager = MagicMock()
+    harness_manager.aremove_agent = AsyncMock()
+    manager._harness_manager = harness_manager
+
+    await manager.delete(agent_id)
+
+    assert manager.get_row(agent_id) is None
+
+
 def test_bootstrap_pending_detects_unfinished_onboarding(tmp_path: Path) -> None:
     from harness_agent.backends import resolve_backend
     from harness_agent.backends.workspace import BackendWorkspace
