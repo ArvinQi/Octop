@@ -9,11 +9,13 @@ import type { SkillSpec } from "../../Agent/Skills/useSkills";
 import { CONNECTORS_CHANGED_EVENT } from "../../Agent/Connectors/customMcpUtils";
 import { activeModelToRef } from "./useChatContextWindow";
 import {
+  hasSavedConnectors,
   loadSavedConnectors,
   loadSavedSkills,
   saveConnectors,
   saveSkills,
 } from "../utils/chatStorage";
+import { resolveInitialConnectors } from "../utils/resolveInitialConnectors";
 
 export function useChatComposerResources(
   resolvedAgentId: string | null | undefined,
@@ -26,7 +28,12 @@ export function useChatComposerResources(
   const [selectedConnectors, setSelectedConnectors] = useState<string[]>([]);
   const [selectedSkills, setSelectedSkills] = useState<string[]>([]);
   const [chatConnectors, setChatConnectors] = useState<
-    { mcp_server_name: string; label: string; kind: string }[]
+    {
+      mcp_server_name: string;
+      label: string;
+      kind: string;
+      default_open?: boolean;
+    }[]
   >([]);
   const [availableModels, setAvailableModels] = useState<ResolvedModel[]>([]);
   const [activeModelRef, setActiveModelRef] = useState<string | null>(null);
@@ -53,6 +60,7 @@ export function useChatComposerResources(
     >
   >({});
 
+  // Auto = omit turn model; backend applies the expert default.
   useEffect(() => {
     const local = activeThreadId
       ? conversationOverrides[activeThreadId]
@@ -113,16 +121,24 @@ export function useChatComposerResources(
             mcp_server_name: i.mcp_server_name,
             label: i.display_name,
             kind: i.kind,
+            default_open: i.default_open === true,
           }));
         setChatConnectors(options);
         const allowed = new Set(options.map((o) => o.mcp_server_name));
-        setSelectedConnectors((prev) => {
-          const saved = resolvedAgentId
-            ? loadSavedConnectors(resolvedAgentId)
-            : [];
-          const base = prev.length > 0 ? prev : saved;
-          return base.filter((n) => allowed.has(n));
-        });
+        const defaults = options
+          .filter((o) => o.default_open)
+          .map((o) => o.mcp_server_name);
+        setSelectedConnectors((prev) =>
+          resolveInitialConnectors({
+            prev,
+            saved: resolvedAgentId ? loadSavedConnectors(resolvedAgentId) : [],
+            hasSaved: resolvedAgentId
+              ? hasSavedConnectors(resolvedAgentId)
+              : false,
+            defaults,
+            allowed,
+          }),
+        );
       });
     };
     loadConnectors();
@@ -153,16 +169,22 @@ export function useChatComposerResources(
 
   useEffect(() => {
     let cancelled = false;
-    void providerApi
-      .listResolvedModels()
-      .then((data) => {
-        if (!cancelled) setAvailableModels(data);
-      })
-      .catch(() => {
-        if (!cancelled) setAvailableModels([]);
-      });
+    const loadModels = () => {
+      void providerApi
+        .listResolvedModels()
+        .then((data) => {
+          if (!cancelled) setAvailableModels(data);
+        })
+        .catch(() => {
+          if (!cancelled) setAvailableModels([]);
+        });
+    };
+    loadModels();
+    const onFocus = () => loadModels();
+    window.addEventListener("focus", onFocus);
     return () => {
       cancelled = true;
+      window.removeEventListener("focus", onFocus);
     };
   }, []);
 

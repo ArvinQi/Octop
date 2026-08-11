@@ -192,6 +192,7 @@ class Gateway:
         )
 
         self._channel_manager = ChannelManager(channels={})
+        self._channel_manager.set_pre_lock_handler(self._preempt_cancel_on_stop)
         await self._channel_manager.start()
 
         self._ws_channel = WebSocketChannel(
@@ -377,6 +378,21 @@ class Gateway:
             )
 
             servers = [s.strip() for s in (mcp_servers or []) if s and str(s).strip()]
+            # Empty job selection → follow default_open. Explicit picks win as-is.
+            if servers:
+                servers = (
+                    self._agent_manager.merge_turn_mcp_servers(
+                        session.user_id, servers, apply_defaults=False
+                    )
+                    or []
+                )
+            else:
+                servers = (
+                    self._agent_manager.merge_turn_mcp_servers(
+                        session.user_id, None, apply_defaults=True
+                    )
+                    or []
+                )
             if servers:
                 failed = await self._agent_manager.prepare_chat_mcp(
                     agent_id,
@@ -450,6 +466,38 @@ class Gateway:
         if self._channel_manager is None:
             raise RuntimeError("gateway not booted")
         return self._channel_manager
+
+    async def _preempt_cancel_on_stop(self, _channel_id: str, message: Any) -> None:
+        """Signal harness cancel for ``/stop`` / ``/cancel`` before the session lock.
+
+        Same-session IM turns are serialized by ChannelManager. Without this hook,
+        ``/stop`` waits behind the in-flight turn and never interrupts it.
+        """
+        from harness_agent.slash import parse_slash
+
+        from octop.infra.gateway.process.message_keys import session_key_from_message
+
+        text = getattr(message, "text", None)
+        cmd = parse_slash(text if isinstance(text, str) else None)
+        if cmd is None or cmd.name not in ("stop", "cancel"):
+            return
+
+        agent_id = getattr(message, "tenant_id", None) or ""
+        if not isinstance(agent_id, str) or not agent_id.strip():
+            return
+
+        session_key = session_key_from_message(message, agent_id=agent_id.strip())
+        thread_id = self._thread_registry.get_bound_thread_id(session_key)
+        if not thread_id:
+            return
+
+        self._agent_manager.cancel_stream(agent_id.strip(), thread_id)
+        logger.info(
+            "preempt cancel: agent=%s thread=%s cmd=/%s",
+            agent_id,
+            thread_id,
+            cmd.name,
+        )
 
     async def push_text(
         self,
