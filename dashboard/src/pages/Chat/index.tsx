@@ -310,6 +310,7 @@ function ChatPageInner() {
     availableModels,
     activeAgent?.default_model,
     activeModelRef,
+    activeAgent,
   );
 
   const sessionUsage = useMemo(() => {
