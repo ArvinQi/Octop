@@ -239,6 +239,12 @@ precommit: format-all lint typecheck test-affected
 # the full suite. Live tests under tests/live/ auto-skip when credentials are
 # absent, so running them unscoped is cheap and safe; the CI `make all` gate
 # keeps `-m "not live"` for the authoritative full run.
+#
+# NOTE: testmon detects changes via `git ls-files -m` (worktree vs index), which
+# is empty once changes are staged — exactly the pre-commit state — so it would
+# silently run zero tests. The patch in conftest.py / tests/support/
+# testmon_staged_changes.py redirects detection to `git diff HEAD` (staged +
+# unstaged) so the gate actually fires on a commit's changes.
 .PHONY: test-affected
 test-affected:
 	@echo "[test] pytest (testmon: only tests affected by changes)..."
