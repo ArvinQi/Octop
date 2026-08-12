@@ -17,6 +17,9 @@
 ### 修复
 - 仪表盘发版后或长时间未打开时白屏：Service Worker 不再 Cache-First 钉死旧 `index.html`；hashed 资源改为 CacheFirst；入口脚本失败时清除 SW 缓存并自动刷新一次 (#236)
 
+### 安全
+- 仪表盘 SPA 静态回退路由加固：在拼接路径前显式拒绝绝对路径与 `..` 父目录引用，并保留最终 `relative_to` 校验，杜绝路径穿越读取 dashboard 目录之外的文件（修复 CodeQL 标记的 Uncontrolled data used in path expression）
+
 ## [0.9.21] - 2026-08-11
 
 ### 新增

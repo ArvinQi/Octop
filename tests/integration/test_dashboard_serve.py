@@ -44,3 +44,16 @@ async def test_hashed_dashboard_assets_are_immutable(tmp_octop_home: Path) -> No
             r = c.get(f"/assets/{sample.name}")
             assert r.status_code == 200
             assert r.headers.get("cache-control") == "public, max-age=31536000, immutable"
+
+
+async def test_path_traversal_is_blocked(tmp_octop_home: Path) -> None:
+    async with octop_client(tmp_octop_home) as (_client, srv):
+        app = build_app(srv)
+        with TestClient(app) as c:
+            # Percent-encoded and literal `..` must not escape the dashboard
+            # root; the SPA fallback must serve index.html (or 404), never a
+            # file outside the dashboard directory.
+            for encoded in ("/%2e%2e%2f%2e%2e%2fetc%2fpasswd", "/..%2f..%2fetc%2fpasswd"):
+                r = c.get(encoded)
+                assert r.status_code in (200, 404)
+                assert "root:" not in r.text

@@ -247,7 +247,12 @@ def build_app(server: OctopServer) -> FastAPI:
                     raise HTTPException(status_code=404, detail="Not Found")
 
                 if full_path:
-                    candidate = (dashboard_dir / full_path).resolve()
+                    raw_path = Path(full_path)
+                    # Reject absolute paths and parent-dir references before
+                    # joining, so user input never drives a path expression.
+                    if raw_path.is_absolute() or ".." in raw_path.parts:
+                        return _dashboard_response(index_file, "")
+                    candidate = (dashboard_dir / Path(*raw_path.parts)).resolve()
                     try:
                         candidate.relative_to(dashboard_dir.resolve())
                     except ValueError:
