@@ -58,6 +58,8 @@ import ChatSidebarPanel from "./components/ChatSidebarPanel";
 import ChatTitleBar from "./components/ChatTitleBar";
 import ChatComposerChrome from "./components/ChatComposerChrome";
 import { isAgentChatReady } from "../../utils/agentError";
+import { useMemoryMaintenance } from "./hooks/useMemoryMaintenance";
+import MemoryMaintenanceBanner from "./components/MemoryMaintenanceBanner";
 import { apiErrorMessage } from "../../utils/apiError";
 import PwaInstallPrompt from "../../components/PwaInstallPrompt";
 import { promptNeedsUserInput } from "../../utils/quickInputPrefill";
@@ -153,6 +155,11 @@ function ChatPageInner() {
   const agentChatReady = isAgentChatReady(activeAgent?.state);
   const sharedExpertViewer = isSharedExpertViewer(activeAgent ?? {});
   const noAgents = !agentsLoading && agents.length === 0;
+  const {
+    status: memoryMaint,
+    visible: memoryMaintVisible,
+    blocking: memoryMaintBlocking,
+  } = useMemoryMaintenance(resolvedAgentId, agentChatReady && !noAgents);
 
   useEffect(() => {
     void refreshAgents({ silent: true });
@@ -784,6 +791,13 @@ function ChatPageInner() {
             />
           )}
 
+          {memoryMaintVisible && memoryMaint && (
+            <MemoryMaintenanceBanner
+              status={memoryMaint}
+              blocking={memoryMaintBlocking}
+            />
+          )}
+
           <div className={styles.chatContent}>
             {!agentChatReady || noAgents ? (
               <AgentNotReadyScreen
@@ -962,7 +976,7 @@ function ChatPageInner() {
             onCancel={cancelStream}
             onNewChat={handleNewChat}
             isStreaming={isStreaming}
-            disabled={!agentChatReady || noAgents}
+            disabled={!agentChatReady || noAgents || memoryMaintBlocking}
             initialText={prefillInputRef.current}
             onComposerCleared={() => {
               prefillInputRef.current = "";
