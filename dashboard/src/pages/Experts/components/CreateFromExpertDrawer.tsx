@@ -20,8 +20,12 @@ import ExpertColorPicker from "../../../components/ExpertColorPicker";
 import { apiErrorMessage } from "../../../utils/apiError";
 import {
   expertPaletteColor,
-  resolveExpertPalette,
+  parseStoredColor,
 } from "../../../utils/expertColor";
+import {
+  DEFAULT_PALETTE,
+  isCuratedPalette,
+} from "../../../styles/themePalettes";
 import {
   buildAgentRuntimeRequest,
   type AgentRuntimeFormValues,
@@ -33,7 +37,6 @@ import {
   defaultModelFromForm,
   MODEL_AUTO_VALUE,
 } from "../../../utils/modelOptions";
-import type { ThemePalette } from "../../../styles/themePalettes";
 import type { ExpertSummary } from "./ExpertCard";
 import { groupExpertFiles, type NamedFileContent } from "./expertFileGroups";
 import { metaForFile } from "./iconForName";
@@ -139,7 +142,7 @@ export default function CreateFromExpertDrawer({
   const [detailLoading, setDetailLoading] = useState(false);
   const [skillPackages, setSkillPackages] = useState<SkillPackage[]>([]);
   const [skillPackagesLoading, setSkillPackagesLoading] = useState(false);
-  const [colorPalette, setColorPalette] = useState<ThemePalette>("rose");
+  const [colorPalette, setColorPalette] = useState<string>("rose");
 
   const backendChoice =
     Form.useWatch("backend_choice", form) ?? DEFAULT_BACKEND;
@@ -157,7 +160,7 @@ export default function CreateFromExpertDrawer({
 
     setPathMappings([]);
     const defaults = sourceDefaults(source, lang);
-    setColorPalette(resolveExpertPalette(defaults.color));
+    setColorPalette(parseStoredColor(defaults.color) ?? DEFAULT_PALETTE);
     form.setFieldsValue({
       name: defaults.name,
       description: defaults.description,
@@ -259,7 +262,9 @@ export default function CreateFromExpertDrawer({
         default_model: defaultModelFromForm(values.default_model) ?? undefined,
         backend: backendSpec,
         skill_package_ids: values.skill_package_ids ?? [],
-        color: expertPaletteColor(colorPalette),
+        color: isCuratedPalette(colorPalette)
+          ? expertPaletteColor(colorPalette)
+          : colorPalette,
         ...buildAgentRuntimeRequest(values),
       };
 
