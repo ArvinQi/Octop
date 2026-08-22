@@ -3180,8 +3180,8 @@
     "title": "Remote Desktop",
     "description": "Control the host desktop or a connected phone from the browser",
     "tabs": {
-      "desktop": "Server desktop",
-      "phone": "Phone desktop"
+      "desktop": "Server",
+      "phone": "Phone"
     }
   },
   "terminal": {

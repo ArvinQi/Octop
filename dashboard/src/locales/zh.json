@@ -3326,8 +3326,8 @@
     "title": "远程桌面",
     "description": "在浏览器中操控服务器桌面或已连接的手机",
     "tabs": {
-      "desktop": "服务器桌面",
-      "phone": "手机桌面"
+      "desktop": "服务器",
+      "phone": "手机"
     }
   },
   "terminal": {
