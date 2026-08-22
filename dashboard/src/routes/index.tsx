@@ -15,6 +15,7 @@ const TokenUsagePage = lazy(() => import("../pages/Control/TokenUsage"));
 
 // Lazy-loaded pages — Control
 const RemoteDesktopPage = lazy(() => import("../pages/Control/RemoteDesktop"));
+const RemoteAndroidPage = lazy(() => import("../pages/Control/RemoteAndroid"));
 
 // Lazy-loaded pages — Settings
 const ModelsPage = lazy(() => import("../pages/Settings/Models"));
@@ -70,6 +71,8 @@ export const pathToKey: Record<string, string> = {
   "/terminal": "workbench",
   "/remote-browser": "workbench",
   "/remote-desktop": "remote-desktop",
+  "/remote-phone": "remote-phone",
+  "/remote-android": "remote-phone",
   "/subagents": "personalization",
   "/mbti": "personalization",
   "/memory": "personalization",
@@ -92,6 +95,7 @@ export const FULLSCREEN_PATHS = new Set([
   "/workbench/browser",
   "/chat",
   "/remote-desktop",
+  "/remote-phone",
 ]);
 
 /**
@@ -158,6 +162,11 @@ export const routeConfigs: RouteConfig[] = [
     element: <RedirectPreserveSearch to="/workbench/browser" />,
   },
   { path: "/remote-desktop", element: <RemoteDesktopPage /> },
+  { path: "/remote-phone", element: <RemoteAndroidPage /> },
+  {
+    path: "/remote-android",
+    element: <Navigate to="/remote-phone" replace />,
+  },
   {
     path: "/subagents",
     element: <RedirectPreserveSearch to="/personalization/subagents" />,
