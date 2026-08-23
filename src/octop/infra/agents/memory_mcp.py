@@ -53,10 +53,14 @@ def _open_memory(server: OctopServer, agent_id: str) -> Any:
     if registry is not None and hasattr(registry, "resolve_workspace_dir"):
         workspace = registry.resolve_workspace_dir(agent_id)
     else:
-        paths = getattr(server, "paths", None) or server.services.paths
+        services = server.services
+        assert services is not None, "server.services required when agent_registry unavailable"
+        paths = getattr(server, "paths", None) or services.paths
         workspace = paths.ensure_agent_workspace(agent_id)
 
-    row = server.services.agent_repo.get(agent_id)
+    services = server.services
+    assert services is not None, "server.services required for memory backend"
+    row = services.agent_repo.get(agent_id)
     cfg: dict[str, Any] = {}
     if row is not None and row.config_json:
         import json  # noqa: PLC0415
@@ -71,7 +75,7 @@ def _open_memory(server: OctopServer, agent_id: str) -> Any:
     ns, backend, backend_config = open_memory_kwargs(
         agent_id=agent_id,
         cfg=cfg,
-        octop_config=server.services.config,
+        octop_config=services.config,
         workspace_dir=workspace,
     )
     return Memory(namespace=ns, backend=backend, backend_config=backend_config)
@@ -91,7 +95,7 @@ def build_memory_mcp(server: OctopServer, agent_id: str) -> FastMCP:
     # /mcp/memory (the default "/mcp" would make it /mcp/memory/mcp).
     mcp.settings.streamable_http_path = "/"
 
-    def _memory():
+    def _memory() -> Any:
         return _open_memory(server, agent_id)
 
     @mcp.tool()
@@ -336,9 +340,12 @@ def mount_memory_mcp(app: Any, server: OctopServer) -> list[Any]:
     if token is None:
         return []
 
+    services = server.services
+    assert services is not None, "server.services required for memory MCP mount"
+
     managers: list[Any] = []
     mcp_apps: dict[str, Any] = {}
-    rows = server.services.agent_repo.list_all(include_disabled=False)
+    rows = services.agent_repo.list_all(include_disabled=False)
     for row in rows:
         agent_id = row.agent_id
         mcp = build_memory_mcp(server, agent_id)
