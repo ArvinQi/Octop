@@ -265,7 +265,9 @@ class _TokenAuthMiddleware:
             await self._app(scope, receive, send)
             return
 
-        headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])}
+        headers = {
+            k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])
+        }
         auth = headers.get("authorization", "")
         provided = auth[7:].strip() if auth.startswith("Bearer ") else ""
         if not provided:
@@ -273,14 +275,16 @@ class _TokenAuthMiddleware:
 
         if provided != self._token:
             body = b'{"error":"unauthorized"}'
-            await send({
-                "type": "http.response.start",
-                "status": 401,
-                "headers": [
-                    (b"content-type", b"application/json"),
-                    (b"content-length", str(len(body)).encode()),
-                ],
-            })
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 401,
+                    "headers": [
+                        (b"content-type", b"application/json"),
+                        (b"content-length", str(len(body)).encode()),
+                    ],
+                }
+            )
             await send({"type": "http.response.body", "body": body})
             return
 
@@ -297,19 +301,23 @@ class _AgentRouter:
         if scope.get("type") != "http":
             return  # lifespan is wired into the host FastAPI manually; http only here
 
-        headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])}
+        headers = {
+            k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])
+        }
         agent_id = headers.get("x-octop-agent-id", "").strip()
         target = self._mcp_apps.get(agent_id)
         if target is None:
             body = b'{"error":"missing or unknown agent_id (X-Octop-Agent-Id)"}'
-            await send({
-                "type": "http.response.start",
-                "status": 404,
-                "headers": [
-                    (b"content-type", b"application/json"),
-                    (b"content-length", str(len(body)).encode()),
-                ],
-            })
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 404,
+                    "headers": [
+                        (b"content-type", b"application/json"),
+                        (b"content-length", str(len(body)).encode()),
+                    ],
+                }
+            )
             await send({"type": "http.response.body", "body": body})
             return
         await target(scope, receive, send)
