@@ -25,6 +25,7 @@ import {
   workspacePathFromAccessUrl,
 } from "../../../utils/toolMediaBlocks";
 import { formatMessageTime } from "../../../utils/formatMessageTime";
+import { copyText } from "../../../utils/copyText";
 import { useServerTimezone } from "../../../hooks/useServerTimezone";
 import { useVoiceOutputContext } from "../../../context/VoiceOutputContext";
 import { prepareSpeechText } from "../../../utils/plainTextForSpeech";
@@ -286,42 +287,14 @@ function CopyButton({ text }: { text: string }) {
 
   const handleCopy = useCallback(async () => {
     if (!text) return;
-    try {
-      if (navigator.clipboard && window.isSecureContext) {
-        try {
-          await navigator.clipboard.writeText(text);
-        } catch {
-          // Clipboard API can fail in PWA standalone mode when the document
-          // loses focus briefly on button press — fall through to execCommand.
-          const ta = document.createElement("textarea");
-          ta.value = text;
-          ta.style.position = "fixed";
-          ta.style.left = "-999999px";
-          ta.style.top = "-999999px";
-          document.body.appendChild(ta);
-          ta.focus();
-          ta.select();
-          document.execCommand("copy");
-          ta.remove();
-        }
-      } else {
-        const ta = document.createElement("textarea");
-        ta.value = text;
-        ta.style.position = "fixed";
-        ta.style.left = "-999999px";
-        ta.style.top = "-999999px";
-        document.body.appendChild(ta);
-        ta.focus();
-        ta.select();
-        document.execCommand("copy");
-        ta.remove();
-      }
-      setCopied(true);
-      antMessage.success(t("common.copied"));
-      setTimeout(() => setCopied(false), 2000);
-    } catch {
+    const ok = await copyText(text);
+    if (!ok) {
       antMessage.error(t("common.copyFailed"));
+      return;
     }
+    setCopied(true);
+    antMessage.success(t("common.copied"));
+    setTimeout(() => setCopied(false), 2000);
   }, [text, t]);
 
   return (
