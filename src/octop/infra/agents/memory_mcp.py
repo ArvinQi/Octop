@@ -360,6 +360,224 @@ def build_memory_mcp(server: OctopServer, agent_id: str) -> FastMCP:
             "user": caller or None,
         }
 
+    # ─── 记忆分层查询 + 流水线调度（L0/L1/L2）─────────────────────────
+    # 参考 DSH 记忆工具集（memory_raws/candidates/atoms/extract/promote/reject），
+    # 把记忆生产流水线的每个环节暴露为 MCP 工具，供外部调度。
+
+    @mcp.tool()
+    def memory_raws(
+        session_id: str | None = None,
+        host: str | None = None,
+        user: str | None = None,
+        limit: int = 50,
+        ctx: Context | None = None,  # type: ignore[type-arg]
+    ) -> dict[str, Any]:
+        """**L0 原始事件列表**：按 session/host/user 过滤查询原始事件（证据源）。
+
+        与 ``memory_search_raw``（全文搜索）互补——本工具做结构化过滤
+        （session/host/user），按时间倒序返回。日常调试 / 溯源用。
+
+        Args:
+            session_id: filter by session (e.g. ``ext:review-bot:user-alice``).
+            host: filter by recording host (e.g. ``mcp-external``).
+            user: filter by caller user id (also read from X-Octop-User-Id).
+            limit: max events (default 50).
+            ctx: injected MCP context.
+        """
+        caller = user or _caller_user(ctx)
+        memory = _memory()
+        events = memory.list_raw(
+            session_id=session_id,
+            host=host,
+            user=user or (caller or None),
+            limit=limit,
+        )
+        return {
+            "events": [
+                {
+                    "event_id": e.id,
+                    "timestamp": e.timestamp.isoformat(),
+                    "session_id": e.session_id,
+                    "user": e.user,
+                    "event_type": e.event_type,
+                    "source": (e.payload or {}).get("source") if e.payload else None,
+                    "content": e.content,
+                }
+                for e in events
+            ],
+            "count": len(events),
+            "caller": caller or None,
+        }
+
+    @mcp.tool()
+    def memory_candidates(
+        status: str | None = None,
+        session_id: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """**L1 候选记忆列表**：查询待审核/已晋升/已拒绝的候选（提取产物）。
+
+        候选由 ``memory_capture`` 触发的提取流水线生成（或手动
+        ``memory_extract``）。默认返回 pending 队列；可用 ``status`` 过滤
+        （pending / promoted / rejected / needs_review / conflict）。
+
+        Args:
+            status: filter by candidate status (default pending).
+            session_id: filter by source session.
+            limit: max candidates (default 50).
+        """
+        memory = _memory()
+        from harness_memory.core import CandidateStatus  # noqa: PLC0415
+
+        status_enum = None
+        if status:
+            try:
+                status_enum = CandidateStatus(status)
+            except ValueError:
+                status_enum = None
+        candidates = memory.list_candidates(
+            status=status_enum,
+            session_id=session_id,
+            limit=limit,
+        )
+        return {
+            "candidates": [
+                {
+                    "candidate_id": c.id,
+                    "status": c.status.value if hasattr(c.status, "value") else str(c.status),
+                    "candidate_type": getattr(c, "candidate_type", None),
+                    "assertion": getattr(c, "assertion", None),
+                    "session_id": getattr(c, "session_id", None),
+                    "confidence": getattr(c, "confidence", None),
+                }
+                for c in candidates
+            ],
+            "count": len(candidates),
+        }
+
+    @mcp.tool()
+    def memory_extract(
+        session_id: str | None = None,
+        limit: int = 100,
+        promote: bool = False,
+    ) -> dict[str, Any]:
+        """**手动触发记忆提取**（L0 → L1，可选直达 L2）：调度生产流水线。
+
+        复用专家进程内 ``MemoryService``（含配置的提取 LLM）同步执行提取：
+        取最近 ``limit`` 条 L0 原始事件 → LLM 类型化提取 → 候选（pending）；
+        ``promote=True`` 时对候选执行晋升检查（L1 → L2 atom），跳过人工审核。
+        运行时无 MemoryService 时返回 ``error``（best-effort）。
+
+        Args:
+            session_id: only extract events of this session; omit for recent all.
+            limit: number of recent raw events to extract (default 100).
+            promote: run promotion on extracted candidates (default False).
+        """
+        runtime_server = server.app_runtime
+        assert runtime_server is not None, "app_runtime required for memory extract"
+        agent = runtime_server.agent_registry.get_agent(agent_id)
+        runtime = getattr(agent, "_memory_runtime", None)
+        service = getattr(runtime, "service", None) if runtime else None
+        if service is None:
+            return {"error": "MemoryService unavailable (agent not running / no memory runtime)"}
+
+        eff_session = session_id or "manual"
+        result = service.extract(eff_session, incremental=True, promote=promote, regen_pages=False)
+        if not isinstance(result, dict):
+            return {"session_id": eff_session, "candidates": 0, "promoted": 0}
+        return {
+            "session_id": eff_session,
+            "events_considered": result.get("events_considered", 0),
+            "candidates": result.get("candidates", 0),
+            "promoted": result.get("promoted", 0) if isinstance(result.get("promotion"), dict) else 0,
+            "error": result.get("failure_reason"),
+        }
+
+    @mcp.tool()
+    def memory_promote(
+        candidate_ids: list[str],
+        importance: str | None = None,
+    ) -> dict[str, Any]:
+        """**审核晋升候选**（L1 → L2）：确认候选为原子记忆。
+
+        对指定候选执行 5 项晋升检查（规则路径），通过则写入 L2 atom，
+        记录 journal。用于人工审核 / 外部调度晋升。
+
+        Args:
+            candidate_ids: candidate ids to promote (from memory_candidates).
+            importance: override importance (low/medium/high); default keep.
+        """
+        memory = _memory()
+        candidates = memory.list_candidates(limit=1000)
+        by_id = {c.id: c for c in candidates}
+        selected = [by_id[cid] for cid in candidate_ids if cid in by_id]
+        if not selected:
+            return {"promoted": 0, "skipped": len(candidate_ids)}
+        result = memory.promote_candidates(selected)
+        return {
+            "promoted": result.promoted if hasattr(result, "promoted") else len(selected),
+            "skipped": len(candidate_ids) - len(selected),
+        }
+
+    @mcp.tool()
+    def memory_reject(
+        candidate_id: str,
+        reason: str = "rejected by external caller",
+    ) -> dict[str, Any]:
+        """**拒绝候选**：标记 rejected + 原因，不进原子层（记录 journal 可审计）。
+
+        Args:
+            candidate_id: candidate id to reject.
+            reason: rejection reason.
+        """
+        memory = _memory()
+        from harness_memory.core import CandidateStatus  # noqa: PLC0415
+
+        ok = memory.update_candidate_status(
+            candidate_id,
+            status=CandidateStatus.REJECTED,
+            decided_by="mcp-external",
+            promotion_reason=reason,
+        )
+        return {"ok": ok, "candidate_id": candidate_id, "status": "rejected"}
+
+    @mcp.tool()
+    def memory_atoms(
+        importance: str | None = None,
+        include_deprecated: bool = False,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """**L2 原子记忆列表**：结构化查询原子记忆（按 importance 过滤）。
+
+        与 ``memory_recall``（语义召回）互补——本工具做结构化枚举
+        （importance / deprecated），返回原子断言 + 置信度 + 重要性。
+
+        Args:
+            importance: filter by importance (low/medium/high).
+            include_deprecated: include deprecated atoms (default False).
+            limit: max atoms (default 50).
+        """
+        memory = _memory()
+        atoms = memory.list_atoms(
+            importance=importance,
+            include_deprecated=include_deprecated,
+            limit=limit,
+        )
+        return {
+            "atoms": [
+                {
+                    "atom_id": a.id,
+                    "assertion": a.assertion,
+                    "entity_id": getattr(a, "entity_id", None),
+                    "confidence": getattr(a, "confidence", None),
+                    "importance": getattr(a, "importance", None),
+                    "created_at": getattr(a, "created_at", None),
+                }
+                for a in atoms
+            ],
+            "count": len(atoms),
+        }
+
     return mcp
 
 

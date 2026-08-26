@@ -51,6 +51,12 @@ def test_build_registers_five_tools(fake_memory):
         "memory_capture",
         "memory_update",
         "memory_search_raw",
+        "memory_raws",
+        "memory_candidates",
+        "memory_extract",
+        "memory_promote",
+        "memory_reject",
+        "memory_atoms",
     }
 
 
@@ -227,3 +233,43 @@ async def test_agent_router_404_unknown_agent():
 
     await router(scope, lambda: {}, _send)
     assert sent[0]["status"] == 404
+
+
+def test_trigger_extract_no_session_returns_false():
+    """No session_id -> no extraction trigger."""
+    assert mm._trigger_extract(mock.MagicMock(), "A1", None) is False
+
+
+def test_trigger_extract_no_service_returns_false(monkeypatch):
+    """Agent without memory runtime/service -> silently skipped."""
+    agent = mock.MagicMock()
+    runtime = mock.MagicMock()
+    runtime.service = None
+    agent._memory_runtime = runtime
+    registry = mock.MagicMock(get_agent=lambda aid: agent)
+    server = mock.MagicMock()
+    server.app_runtime.agent_registry = registry
+    assert mm._trigger_extract(server, "A1", "kiro-chat") is False
+
+
+def test_trigger_extract_schedules_service(monkeypatch):
+    """With a service, asynchronously schedule extract and return True."""
+    import asyncio
+    import time
+
+    agent = mock.MagicMock()
+    service = mock.MagicMock()
+    runtime = mock.MagicMock()
+    runtime.service = service
+    agent._memory_runtime = runtime
+    registry = mock.MagicMock(get_agent=lambda aid: agent)
+    server = mock.MagicMock()
+    server.app_runtime.agent_registry = registry
+
+    async def _run():
+        return mm._trigger_extract(server, "A1", "kiro-chat")
+
+    assert asyncio.run(_run()) is True
+    time.sleep(0.1)
+    service.extract.assert_called()
+    assert service.extract.call_args.args[0] == "kiro-chat"
