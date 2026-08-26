@@ -14,7 +14,7 @@ raw vs atom (aligned with ``MemoryService``):
 * ``memory_capture`` -> ``add_raw``: writes an **L0 raw event**, which goes
   through the extraction pipeline (extract -> candidate -> promote -> atom).
   Use it to record raw conversations / events. The record is visible
-  immediately via ``memory_search_raw``; ``memory_recall`` returns it only
+  immediately via ``memory_raws``; ``memory_recall`` returns it only
   after extraction promotes it to an atom.
 * ``memory_save`` -> ``store``: persists a structured fact directly into the
   canonical atom/tree (durable, no extraction). Use it when you already know
@@ -225,7 +225,7 @@ def build_memory_mcp(server: OctopServer, agent_id: str) -> FastMCP:
 
         **日常使用**：把对话/事件原始内容记录下来，交给自动提取流水线
         （extract -> candidate -> promote -> atom），稍后经 ``memory_recall``
-        可召回。记录后立即可用 ``memory_search_raw`` 查询。The source marker
+        可召回。记录后立即可用 ``memory_raws`` 查询。The source marker
         is stored in ``payload.source``; the caller id (from ``X-Octop-User-Id``
         header or ``user`` arg) is stored on the raw event for per-user
         traceability.
@@ -272,49 +272,10 @@ def build_memory_mcp(server: OctopServer, agent_id: str) -> FastMCP:
             "recorded": True,
             "extract_scheduled": extract_scheduled,
             "note": (
-                "raw (L0) event recorded; visible now via memory_search_raw, "
+                "raw (L0) event recorded; visible now via memory_raws, "
                 "recallable via memory_recall after the extraction pipeline "
                 "promotes it to an atom"
             ),
-        }
-
-    @mcp.tool()
-    def memory_search_raw(
-        query: str,
-        limit: int = 10,
-        user: str | None = None,
-        ctx: Context | None = None,  # type: ignore[type-arg]
-    ) -> dict[str, Any]:
-        """FTS-search L0 raw events of this expert (capture visible immediately).
-
-        Unlike ``memory_recall`` (which reads atoms), this searches the raw
-        event layer, so records written by ``memory_capture`` are visible right
-        away, before extraction promotes them.
-
-        Args:
-            query: keywords to match against raw event content.
-            limit: max number of events to return.
-            user: optional caller id (overrides the ``X-Octop-User-Id`` header);
-                returned in ``caller`` for per-caller traceability.
-            ctx: injected MCP context (reads ``X-Octop-User-Id`` header).
-        """
-        caller = user or _caller_user(ctx)
-        memory = _memory()
-        events = memory.search_raw(query, limit=limit)
-        return {
-            "events": [
-                {
-                    "event_id": e.id,
-                    "timestamp": e.timestamp.isoformat(),
-                    "session_id": e.session_id,
-                    "user": e.user,
-                    "source": (e.payload or {}).get("source") if e.payload else None,
-                    "content": e.content,
-                }
-                for e in events
-            ],
-            "count": len(events),
-            "caller": caller or None,
         }
 
     @mcp.tool()
@@ -366,18 +327,21 @@ def build_memory_mcp(server: OctopServer, agent_id: str) -> FastMCP:
 
     @mcp.tool()
     def memory_raws(
+        query: str | None = None,
         session_id: str | None = None,
         host: str | None = None,
         user: str | None = None,
         limit: int = 50,
         ctx: Context | None = None,  # type: ignore[type-arg]
     ) -> dict[str, Any]:
-        """**L0 原始事件列表**：按 session/host/user 过滤查询原始事件（证据源）。
+        """**L0 原始事件查询**：FTS 搜索或结构化过滤原始事件（证据源）。
 
-        与 ``memory_search_raw``（全文搜索）互补——本工具做结构化过滤
-        （session/host/user），按时间倒序返回。日常调试 / 溯源用。
+        合并了原 ``memory_search_raw``（全文搜索）与结构化过滤两种能力：
+        ``query`` 走 FTS 全文搜索（capture 立即可见，提取前也可查），
+        ``session_id``/``host``/``user`` 做结构化过滤。按时间倒序返回。
 
         Args:
+            query: FTS keywords to match raw event content (optional).
             session_id: filter by session (e.g. ``ext:review-bot:user-alice``).
             host: filter by recording host (e.g. ``mcp-external``).
             user: filter by caller user id (also read from X-Octop-User-Id).
@@ -386,7 +350,7 @@ def build_memory_mcp(server: OctopServer, agent_id: str) -> FastMCP:
         """
         caller = user or _caller_user(ctx)
         memory = _memory()
-        events = memory.list_raw(
+        events = memory.search_raw(query, limit=limit) if query else memory.list_raw(
             session_id=session_id,
             host=host,
             user=user or (caller or None),
@@ -540,43 +504,6 @@ def build_memory_mcp(server: OctopServer, agent_id: str) -> FastMCP:
             promotion_reason=reason,
         )
         return {"ok": ok, "candidate_id": candidate_id, "status": "rejected"}
-
-    @mcp.tool()
-    def memory_atoms(
-        importance: str | None = None,
-        include_deprecated: bool = False,
-        limit: int = 50,
-    ) -> dict[str, Any]:
-        """**L2 原子记忆列表**：结构化查询原子记忆（按 importance 过滤）。
-
-        与 ``memory_recall``（语义召回）互补——本工具做结构化枚举
-        （importance / deprecated），返回原子断言 + 置信度 + 重要性。
-
-        Args:
-            importance: filter by importance (low/medium/high).
-            include_deprecated: include deprecated atoms (default False).
-            limit: max atoms (default 50).
-        """
-        memory = _memory()
-        atoms = memory.list_atoms(
-            importance=importance,
-            include_deprecated=include_deprecated,
-            limit=limit,
-        )
-        return {
-            "atoms": [
-                {
-                    "atom_id": a.id,
-                    "assertion": a.assertion,
-                    "entity_id": getattr(a, "entity_id", None),
-                    "confidence": getattr(a, "confidence", None),
-                    "importance": getattr(a, "importance", None),
-                    "created_at": getattr(a, "created_at", None),
-                }
-                for a in atoms
-            ],
-            "count": len(atoms),
-        }
 
     return mcp
 

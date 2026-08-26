@@ -50,13 +50,11 @@ def test_build_registers_five_tools(fake_memory):
         "memory_save",
         "memory_capture",
         "memory_update",
-        "memory_search_raw",
         "memory_raws",
         "memory_candidates",
         "memory_extract",
         "memory_promote",
         "memory_reject",
-        "memory_atoms",
     }
 
 
@@ -105,18 +103,19 @@ def test_memory_capture_goes_add_raw(fake_memory):
     assert "raw (L0)" in result["note"]
 
 
-def test_memory_search_raw_queries_l0(fake_memory):
+def test_memory_raws_queries_l0_with_query(fake_memory):
     class _Evt:
         id = "evt1"
         timestamp = __import__("datetime").datetime(2026, 8, 19)
         session_id = "review-1"
         user = "u1"
+        event_type = "manual"
         payload = {"source": "review-bot"}
         content = "report panel banner hidden"
 
     fake_memory.search_raw.return_value = [_Evt()]
     mcp = mm.build_memory_mcp(mock.MagicMock(), "A1")
-    result = _tools(mcp)["memory_search_raw"].fn(query="report panel banner", limit=5)
+    result = _tools(mcp)["memory_raws"].fn(query="report panel banner", limit=5)
     fake_memory.search_raw.assert_called_once_with("report panel banner", limit=5)
     assert result["count"] == 1
     assert result["events"][0]["event_id"] == "evt1"
