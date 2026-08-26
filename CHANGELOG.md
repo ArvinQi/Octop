@@ -6,14 +6,17 @@
 
 ## [Unreleased]
 
+## [0.9.28] - 2026-08-26
+
 ### 修复
 
-- 无「应用更新」权限时隐藏检查更新入口（按权限而非 admin 角色）
-- `/compact` 卸载路径展示兼容 `.octop/conversation_history/`
+- 无更新权限时隐藏检查更新入口
+- `/compact` 兼容 `.octop/conversation_history/` 卸载路径
+- FnOS 镜像改为 Docker Hub `jubaoliang/octop`
 
-### 其他
+### 新增
 
-- 测试：`pytest-xdist` 并行、`make test-fast`、`slow` 标记与隔离 HOME
+- 基层医生学习助手增加普通医学问答快路径、国内专业学会/专科分会与国际指南精确路由，并完善受控信源降级和检索预算。
 
 ## [0.9.27] - 2026-08-26
 
