@@ -6,23 +6,38 @@
 
 ## [Unreleased]
 
+## [0.9.27] - 2026-08-26
+
 ### 新增
 
-- 内置插件随安装包分发：`octop init` / 服务启动时种植到 `~/.octop/plugins`，默认关闭；用户卸载后升级不再重建。
-- 可配置上传上限：`config.json` 的 `max_upload_mb` 与环境变量 `OCTOP_MAX_UPLOAD_MB`（1–1024，默认 100MB），同时约束聊天附件、知识库文档与 IM inbound。
-- Dashboard 推送通知：定时任务与主动关怀通过 `/api/notifications/ws` 以 toast 送达当前用户的所有会话。
-- 聊天支持音频 / 视频附件的预览与播放。
-- 模型管理页新增生成模型分区，支持配置与测试火山方舟 Seedream / Seedance；聊天工具卡片可展示生成结果，并针对凭证、模型权限、限流、内容安全与延迟加载失败给出结构化原因和下一步操作。
-- 连接器：腾讯设计 Ardot、滴答清单（dida365）；远程 MCP OAuth（Notion / Ardot / 滴答等）改为 catalog 驱动（`oauth_issuer` / `mcp_url` / `oauth_resource` / `oauth_scopes`），共用 DCR+PKCE 与回调，支持一键授权与手动粘贴 Token
-- 工具设置：单工具 `PATCH /agents/{id}/tool-settings/{name}`；插件工具开关热更新（不再 reload）；列表标注能力未挂载工具；harness `tools_disabled`（需 orcakit-harness-agent >=0.9.25）
-- ACP 内置 Runner：新增 Kimi Code（`kimi acp`）、Cursor CLI（`agent acp`）、Pi（`npx -y pi-acp`）卡片与默认启动命令
+- 内置插件随包装分发（默认关闭，卸载后升级不重建）
+- 可配置上传上限（`max_upload_mb` / `OCTOP_MAX_UPLOAD_MB`，默认 100MB）
+- Dashboard 推送通知（定时任务与主动关怀 toast）
+- 聊天音视频附件预览播放，并扩展 inbound 附件 MIME
+- 火山方舟 Seedream / Seedance 生成模型配置、测试与结果展示
+- 连接器：Ardot、滴答清单；远程 MCP OAuth 改为 catalog 驱动
+- 单工具开关热更新与插件工具目录
+- ACP 内置 Runner：Kimi Code、Cursor CLI、Pi
+- 知识库文件夹重命名
+- ONNX 模型下载竞速 Hugging Face 与 hf-mirror
+- 远程手机 ADB shell（旋转与分屏布局）
+- FnOS NAS 应用打包（Docker / native `.fpk`）
+- 专家模板扩充（通用、Karpathy、临床来源策略）
+- 中文子智能体约 49 个（HR / 法务 / 供应链）
+- Dashboard 剪贴板回退与聊天 UI 打磨
 
 ### 修复
 
-- 知识库文件夹内点击操作按钮不再误打开该文件夹。
-- 工具的预期运行错误不再统一显示为前端 `stream_error`；失败状态会在实时聊天与历史记录中保留，缺少凭证或模型权限时可直接跳转到生成模型设置。
-- 连接器 OAuth：公网回调使用 `X-Forwarded-*` 解析的公开基址；MCP OAuth 连接器在非回环地址要求 HTTPS；授权完成后前端可自动保存实例（含 COOP 下通过 pending 轮询）
-- 界面国际化：为 antd 组件补充 `ConfigProvider` locale（跟随界面语言切换），OK/Cancel、Refresh、Create 等此前在英文界面下仍显示英文的组件文案现随语言切换；并全球化 `Settings/octop/Providers.tsx` 全部按钮与文案（该文件当前未接入路由）
+- 知识库文件夹操作按钮误开文件夹
+- 工具预期失败不再误报为 `stream_error`
+- 连接器 OAuth 公网回调 / HTTPS / 自动保存；npm 不可写时回退用户级 prefix
+- SSO ID token issuer 校验
+- Dashboard：SW 激活后再 reload、Firefox 无限刷新、选择器 popover、文案全球化
+- 浏览器 runtime 目录在 Windows 上可写探测
+
+### 变更
+
+- FnOS 打包拆分为 `docker/` 与 `native/`
 
 ## [0.9.26] - 2026-08-23
 
