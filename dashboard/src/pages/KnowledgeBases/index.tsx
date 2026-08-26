@@ -875,12 +875,18 @@ export default function KnowledgeBasesPage() {
     if (!selected || !renameTarget) return;
     const name = renameName.trim();
     if (!name) return;
-    if (name === knowledgeBasename(renameTarget.path || renameTarget.filename)) {
+    if (
+      name === knowledgeBasename(renameTarget.path || renameTarget.filename)
+    ) {
       setRenameModalOpen(false);
       return;
     }
     try {
-      await knowledgeBasesApi.renameDocument(selected.id, renameTarget.id, name);
+      await knowledgeBasesApi.renameDocument(
+        selected.id,
+        renameTarget.id,
+        name,
+      );
       setRenameModalOpen(false);
       setRenameTarget(null);
       setRenameName("");
