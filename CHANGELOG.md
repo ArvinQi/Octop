@@ -6,14 +6,13 @@
 
 ## [Unreleased]
 
+## [0.9.28] - 2026-08-26
+
 ### 修复
 
-- 无「应用更新」权限时隐藏检查更新入口（按权限而非 admin 角色）
-- `/compact` 卸载路径展示兼容 `.octop/conversation_history/`
-
-### 其他
-
-- 测试：`pytest-xdist` 并行、`make test-fast`、`slow` 标记与隔离 HOME
+- 无更新权限时隐藏检查更新入口
+- `/compact` 兼容 `.octop/conversation_history/` 卸载路径
+- FnOS 镜像改为 Docker Hub `jubaoliang/octop`
 
 ## [0.9.27] - 2026-08-26
 
