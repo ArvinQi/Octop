@@ -6,6 +6,13 @@
 
 ## [Unreleased]
 
+### 变更
+
+- Docker / FnOS 镜像对外统一为 `ghcr.io/tencentcloud/octop`（仍同步推送 Docker Hub；移除 vanilla 镜像标签）
+- FnOS FPK 在 Release 成功后自动构建：复用 GHCR 镜像与 Release wheel，不再重复编镜像
+- 正式发版时 Auto Tag 同步触发桌面客户端打包，产物挂到同一 `v*` GitHub Release（不再对任意分支 push 跑六平台矩阵）
+- 修复 Auto Tag → `workflow_dispatch` 时 Docker 镜像可能只有 `:latest`、缺少 `:{version}` 的问题（显式从 tag 解析版本）
+
 ### 修复
 
 - 合并冲突的双份 schema v10 迁移：投影表不再被 `010_kb_max_documents` 抢先抬版本而跳过；启动时幂等补建 `thread_messages` / `thread_history_projection`
