@@ -7,7 +7,16 @@
  *     with local model list, download, and delete UI
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { App, Button, Divider, Form, Input, Modal, Progress, Select } from "antd";
+import {
+  App,
+  Button,
+  Divider,
+  Form,
+  Input,
+  Modal,
+  Progress,
+  Select,
+} from "antd";
 
 import { Download, Key, Loader2, Trash2, X, Zap } from "lucide-react";
 import { useTranslation } from "react-i18next";
