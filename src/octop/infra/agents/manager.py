@@ -2305,6 +2305,7 @@ class AgentManager:
         from harness_agent.middleware.bootstrap import bootstrap_marker_exists  # noqa: PLC0415
 
         from octop.infra.agents.workspace_dir import (  # noqa: PLC0415
+            harness_workspace_path,
             resolve_workspace_host_path,
             system_files_path_from_config,
         )
@@ -2313,7 +2314,7 @@ class AgentManager:
         raw = cfg.get("workspace_dir")
         if isinstance(raw, str) and raw.strip():
             # Persisted value goes to harness as-is; host map is Octop-local only.
-            harness_workspace = Path(raw.strip())
+            harness_workspace = harness_workspace_path(raw, cfg)
             workspace_dir = resolve_workspace_host_path(raw, cfg)
             workspace_dir.mkdir(parents=True, exist_ok=True)
         else:

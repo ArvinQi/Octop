@@ -18,9 +18,6 @@ import (
 //go:embed assets/*
 var assets embed.FS
 
-//go:embed assets/tray-icon.png
-var trayIcon []byte
-
 const trayDoubleClick = 400 * time.Millisecond
 
 // App is the Wails service bound to the shell UI.
@@ -337,7 +334,7 @@ func main() {
 	api.app = app
 	attachOpenURLEventListener(app, api.OpenExternal)
 	app.Event.OnApplicationEvent(events.Common.ApplicationStarted, func(_ *application.ApplicationEvent) {
-		app.SetIcon(trayIcon)
+		applyAppIcon(app)
 	})
 
 	win := app.Window.NewWithOptions(application.WebviewWindowOptions{
@@ -396,7 +393,7 @@ func main() {
 	})
 
 	tray := app.SystemTray.New()
-	tray.SetIcon(trayIcon)
+	applyTrayIcon(tray)
 	tray.SetTooltip("Octop")
 	tray.AttachWindow(settingsWin).WindowOffset(6)
 	tray.OnClick(func() { api.onTrayLeftClick() })
