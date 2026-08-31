@@ -57,7 +57,6 @@ def test_bootstrap_main_spec_en_locale_uses_english_label() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.skipif(os.name != "posix", reason="POSIX virtual_mode without root_dir behavior")
 async def test_virtual_mode_without_root_dir_defaults_to_workspace() -> None:
     """``root_dir`` omitted → harness uses ``workspace_dir``; files land in workspace."""
     with tempfile.TemporaryDirectory() as ws_dir:
