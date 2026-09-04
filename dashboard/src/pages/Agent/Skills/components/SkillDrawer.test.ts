@@ -18,6 +18,7 @@ describe("isValidSkillName", () => {
     expect(isValidSkillName("a/b")).toBe(false);
     expect(isValidSkillName("a\\b")).toBe(false);
     expect(isValidSkillName('a:b*c?d"e<f>g|h')).toBe(false);
+    expect(isValidSkillName("line\nbreak")).toBe(false);
     expect(isValidSkillName("")).toBe(false);
     expect(isValidSkillName("x".repeat(65))).toBe(false);
   });
@@ -34,6 +35,27 @@ describe("SkillDrawer emoji metadata", () => {
     });
     expect(md).toMatch(/emoji:\s*"?⚙️"?/);
     expect(md).toContain("octop:");
+  });
+
+  it("writes localized presentation fields into octop metadata", () => {
+    const md = buildSkillMarkdown({
+      name: "demo",
+      description: "Agent trigger description",
+      labelZh: "演示技能",
+      labelEn: "Demo Skill",
+      summaryZh: "完成演示任务",
+      summaryEn: "Complete demo tasks",
+      emoji: "⚙️",
+      metadata: [],
+      body: "Do things.",
+    });
+
+    expect(md).toContain("label:");
+    expect(md).toContain("zh: 演示技能");
+    expect(md).toContain("en: Demo Skill");
+    expect(md).toContain("summary:");
+    expect(md).toContain("zh: 完成演示任务");
+    expect(md).toContain("en: Complete demo tasks");
   });
 
   it("extracts emoji from flattened metadata and keeps other keys", () => {

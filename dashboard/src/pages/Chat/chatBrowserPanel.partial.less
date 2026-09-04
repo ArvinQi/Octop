@@ -39,7 +39,7 @@
 
 .chatFloatActions {
   position: absolute;
-  right: 14px;
+  right: 0;
   top: 50%;
   transform: translateY(-50%);
   z-index: 5;
@@ -47,12 +47,28 @@
   flex-direction: column;
   align-items: center;
   gap: 12px;
+  /* Extra padding is the approach zone: fade in before the pointer hits icons. */
+  padding: 40px 14px 40px 40px;
+  box-sizing: border-box;
+  opacity: 0;
+  transition: opacity var(--fn-transition-fast, 0.15s ease);
+
+  &:hover,
+  &:focus-within {
+    opacity: 1;
+  }
+
+  @media (hover: none) {
+    opacity: 1;
+  }
 
   @media (max-width: 767px) {
     right: 10px;
     top: auto;
     bottom: 88px;
     transform: none;
+    padding: 0;
+    opacity: 1;
   }
 }
 
@@ -219,6 +235,39 @@
   display: flex;
   align-items: center;
   justify-content: center;
+}
+
+.dockToolUiBody {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  width: 100%;
+  overflow: auto;
+  padding: 12px;
+  box-sizing: border-box;
+
+  /* Stretch plugin cards that use chat-column maxWidth (often inline). */
+  .toolUiRendererWrap,
+  [data-octop-tool-renderer],
+  [data-octop-plugin-ui],
+  .octop-builtin-ui-fallback {
+    display: block;
+    width: 100% !important;
+    max-width: 100% !important;
+    box-sizing: border-box;
+  }
+}
+
+.dockToolUiMissing {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  color: var(--fn-text-tertiary);
+  font-size: 13px;
+  text-align: center;
 }
 
 .dockFileList {

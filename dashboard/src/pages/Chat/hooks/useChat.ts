@@ -25,8 +25,11 @@ import {
 } from "../../../utils/messageParser";
 import { normalizeComposerContext } from "../utils/chatMessages";
 import { resolveMessageTimestampMs } from "../../../utils/formatMessageTime";
-import { isImageAttachment } from "../utils/chatAttachments";
-import { agentAttachmentAccessUrl } from "../../../utils/toolMediaBlocks";
+import { inferKindFromNameAndMime } from "../utils/chatAttachments";
+import {
+  agentAttachmentAccessUrl,
+  parseToolExecutionFeedback,
+} from "../../../utils/toolMediaBlocks";
 import { injectPendingHitlMessage } from "../../../utils/injectPendingHitlMessage";
 import type {
   ChatAttachment,
@@ -233,7 +236,13 @@ export function extractAttachments(content: unknown): ChatAttachment[] {
         };
       }
 
-      if (type !== "image" && type !== "file") return null;
+      if (
+        type !== "image" &&
+        type !== "file" &&
+        type !== "video" &&
+        type !== "audio"
+      )
+        return null;
 
       const previewUrl = anyBlock.preview_url as string | undefined;
       const source = anyBlock.source as
@@ -263,13 +272,13 @@ export function extractAttachments(content: unknown): ChatAttachment[] {
           filename,
           mediaType: source.media_type,
           workspacePath,
-          kind: isImageAttachment({
-            kind: type === "image" ? "image" : "file",
-            filename,
+          kind: inferKindFromNameAndMime(
             mediaType,
-          })
-            ? "image"
-            : "file",
+            filename,
+            type === "image" || type === "video" || type === "audio"
+              ? type
+              : "file",
+          ),
         };
       }
 
@@ -293,13 +302,13 @@ export function extractAttachments(content: unknown): ChatAttachment[] {
         filename,
         mediaType,
         workspacePath,
-        kind: isImageAttachment({
-          kind: type === "image" ? "image" : "file",
-          filename,
+        kind: inferKindFromNameAndMime(
           mediaType,
-        })
-          ? "image"
-          : "file",
+          filename,
+          type === "image" || type === "video" || type === "audio"
+            ? type
+            : "file",
+        ),
       };
     })
     .filter(Boolean) as ChatAttachment[];
@@ -320,10 +329,13 @@ function attachmentsFromInboundMeta(
       const filename = String(row.filename || "attachment");
       const mediaType = String(row.media_type || row.mediaType || "");
       const kindRaw = String(row.kind || "");
-      const kind: ChatAttachment["kind"] =
-        kindRaw === "image" || mediaType.startsWith("image/")
-          ? "image"
-          : "file";
+      const kind = inferKindFromNameAndMime(
+        mediaType,
+        filename,
+        kindRaw === "image" || kindRaw === "video" || kindRaw === "audio"
+          ? kindRaw
+          : "file",
+      );
       if (!workspacePath) return null;
       return {
         url: "",
@@ -369,6 +381,8 @@ function enrichAttachmentPreviewUrls(
 function convertCallEntries(entries: CallEntry[]): ChatMessage[] {
   const raw: InternalChatMessage[] = entries.map((entry, index) => {
     const tool = extractToolData(entry.content);
+    const toolFeedback = parseToolExecutionFeedback(tool?.data.output);
+    const toolErrorCode = toolFeedback?.code || tool?.data.errorCode;
     const fromMeta =
       entry.role === "user"
         ? attachmentsFromInboundMeta(
@@ -431,8 +445,20 @@ function convertCallEntries(entries: CallEntry[]): ChatMessage[] {
       toolData: tool?.data,
       usage: normalizeTokenUsage(entry.usage ?? undefined) ?? undefined,
       metadata: normalizeMessageMetadata(entry.metadata ?? undefined),
+      errorInfo:
+        tool?.kind === "result" && (toolFeedback?.isError || toolErrorCode)
+          ? {
+              message: toolFeedback?.message || tool?.data.output,
+              code: toolErrorCode || "tool_error",
+              source: "tool_result",
+              retryable: toolFeedback?.retryable,
+            }
+          : undefined,
       _toolKind: tool?.kind,
-      status: "done",
+      status:
+        tool?.kind === "result" && (toolFeedback?.isError || toolErrorCode)
+          ? "error"
+          : "done",
       timestamp: resolveEntryTimestamp(entry),
     };
   });
@@ -460,7 +486,8 @@ function convertCallEntries(entries: CallEntry[]): ChatMessage[] {
             errorCode: current.toolData?.errorCode,
             returnCode: current.toolData?.returnCode,
           },
-          status: "done",
+          status: current.status,
+          errorInfo: current.errorInfo,
         };
         continue;
       }
@@ -656,6 +683,8 @@ async function loadThreadHistory(
   nextOffset: number;
   turnActive: boolean;
   artifacts: string[];
+  projectionLoading: boolean;
+  retryAfterMs: number;
 }> {
   try {
     const { octopThreadsApi, CHAT_HISTORY_PAGE_SIZE } = await import(
@@ -695,6 +724,11 @@ async function loadThreadHistory(
       nextOffset: offset + limit,
       turnActive: Boolean(history.turn_active),
       artifacts,
+      projectionLoading: Boolean(history.history_loading),
+      retryAfterMs:
+        typeof history.history_retry_after_ms === "number"
+          ? history.history_retry_after_ms
+          : 1500,
     };
   } catch (err) {
     console.error("loadThreadHistory failed", err);
@@ -704,6 +738,8 @@ async function loadThreadHistory(
       nextOffset: 0,
       turnActive: false,
       artifacts: [],
+      projectionLoading: false,
+      retryAfterMs: 1500,
     };
   }
 }
@@ -852,18 +888,32 @@ export function useChat(
       setHistoryLoading(true);
 
       try {
-        const {
-          messages: converted,
-          hasMore,
-          nextOffset,
-          turnActive,
-        } = await loadThreadHistory(agentId, targetThreadId, { offset: 0 });
-        if (loadGenRef.current !== gen) return;
-        chatStore.setHistoryPage(key, converted, {
-          hasMore,
-          nextOffset,
+        let loaded = await loadThreadHistory(agentId, targetThreadId, {
+          offset: 0,
         });
-        if (shouldProbeActiveTurn({ isStreaming: false, turnActive })) {
+        while (loaded.projectionLoading && loadGenRef.current === gen) {
+          await new Promise((resolve) =>
+            window.setTimeout(
+              resolve,
+              Math.max(500, Math.min(loaded.retryAfterMs, 5000)),
+            ),
+          );
+          if (loadGenRef.current !== gen) return;
+          loaded = await loadThreadHistory(agentId, targetThreadId, {
+            offset: 0,
+          });
+        }
+        if (loadGenRef.current !== gen) return;
+        chatStore.setHistoryPage(key, loaded.messages, {
+          hasMore: loaded.hasMore,
+          nextOffset: loaded.nextOffset,
+        });
+        if (
+          shouldProbeActiveTurn({
+            isStreaming: false,
+            turnActive: loaded.turnActive,
+          })
+        ) {
           attachAfterHistory(key, targetThreadId);
         }
       } finally {
@@ -912,54 +962,59 @@ export function useChat(
    * Used when the user overscrolls at the bottom to recover from a dropped WS
    * stream that left the last assistant turn incomplete in memory.
    */
-  const refreshHistory = useCallback(async () => {
-    const key = stableSessionId;
-    const snap = chatStore.getSnapshot(key);
-    if (
-      refreshInFlightRef.current ||
-      historyRefreshing ||
-      historyLoading ||
-      shouldBlockHistoryRefresh({
-        isStreaming: snap.isStreaming,
-        hasLiveSocket: chatStore.hasLiveSocket(key),
-      }) ||
-      !agentId ||
-      key === "__empty__"
-    ) {
-      return;
-    }
+  const refreshHistory = useCallback(
+    async (targetSessionId?: string) => {
+      const key = targetSessionId || stableSessionId;
+      const snap = chatStore.getSnapshot(key);
+      if (
+        refreshInFlightRef.current ||
+        historyRefreshing ||
+        historyLoading ||
+        shouldBlockHistoryRefresh({
+          isStreaming: snap.isStreaming,
+          hasLiveSocket: chatStore.hasLiveSocket(key),
+        }) ||
+        !agentId ||
+        key === "__empty__"
+      ) {
+        return;
+      }
 
-    refreshInFlightRef.current = true;
-    // Separate from loadGenRef: loadHistory may bump loadGen while we fetch.
-    // Always clear the refreshing flag in finally so the footer cannot stick.
-    const gen = ++loadGenRef.current;
-    setHistoryRefreshing(true);
+      refreshInFlightRef.current = true;
+      // Separate from loadGenRef: loadHistory may bump loadGen while we fetch.
+      // Always clear the refreshing flag in finally so the footer cannot stick.
+      const gen = ++loadGenRef.current;
+      setHistoryRefreshing(true);
 
-    try {
-      const {
-        messages: latest,
-        hasMore,
-        nextOffset,
-      } = await loadThreadHistory(agentId, key, { offset: 0 });
-      // Stale after a concurrent loadHistory / newer refresh — drop apply only.
-      if (loadGenRef.current !== gen) return;
+      try {
+        const {
+          messages: latest,
+          hasMore,
+          nextOffset,
+        } = await loadThreadHistory(agentId, key, { offset: 0 });
+        // Stale after a concurrent loadHistory / newer refresh — drop apply only.
+        if (loadGenRef.current !== gen) return;
 
-      // Keep older pages the user already scrolled in; replace the overlapping
-      // latest-page window with the server copy so truncated WS turns heal.
-      const latestIds = new Set(latest.map((m) => m.id));
-      const firstOverlap = snap.messages.findIndex((m) => latestIds.has(m.id));
-      const olderPrefix =
-        firstOverlap > 0 ? snap.messages.slice(0, firstOverlap) : [];
-      chatStore.setHistoryPage(key, [...olderPrefix, ...latest], {
-        hasMore: olderPrefix.length > 0 ? snap.historyHasMore : hasMore,
-        nextOffset:
-          olderPrefix.length > 0 ? snap.historyNextOffset : nextOffset,
-      });
-    } finally {
-      refreshInFlightRef.current = false;
-      setHistoryRefreshing(false);
-    }
-  }, [agentId, stableSessionId, historyRefreshing, historyLoading]);
+        // Keep older pages the user already scrolled in; replace the overlapping
+        // latest-page window with the server copy so truncated WS turns heal.
+        const latestIds = new Set(latest.map((m) => m.id));
+        const firstOverlap = snap.messages.findIndex((m) =>
+          latestIds.has(m.id),
+        );
+        const olderPrefix =
+          firstOverlap > 0 ? snap.messages.slice(0, firstOverlap) : [];
+        chatStore.setHistoryPage(key, [...olderPrefix, ...latest], {
+          hasMore: olderPrefix.length > 0 ? snap.historyHasMore : hasMore,
+          nextOffset:
+            olderPrefix.length > 0 ? snap.historyNextOffset : nextOffset,
+        });
+      } finally {
+        refreshInFlightRef.current = false;
+        setHistoryRefreshing(false);
+      }
+    },
+    [agentId, stableSessionId, historyRefreshing, historyLoading],
+  );
 
   /**
    * Edit a historical user message: truncate everything from that message
@@ -1009,9 +1064,11 @@ export function useChat(
       const threadId =
         storeKey || (stableSessionId !== "__empty__" ? stableSessionId : "");
       if (!threadId || threadId === "__empty__") return;
-      void chatStore.resumeHitl(key, agentId, threadId, decisions);
+      void chatStore.resumeHitl(key, agentId, threadId, decisions, () => {
+        void refreshHistory(threadId);
+      });
     },
-    [agentId, stableSessionId],
+    [agentId, stableSessionId, refreshHistory],
   );
 
   return {

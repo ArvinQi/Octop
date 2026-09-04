@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 
 import pytest
@@ -101,6 +102,8 @@ def test_validate_weiyun_token_normalizes_prefix():
 def test_build_notion_remote_spec():
     entry = get_catalog_entry("notion")
     assert entry is not None
+    assert entry.oauth_issuer == "https://mcp.notion.com"
+    assert entry.mcp_url == "https://mcp.notion.com/mcp"
     spec = build_http_mcp_spec(
         entry=entry,
         instance_id="x",
@@ -110,6 +113,297 @@ def test_build_notion_remote_spec():
     assert spec["url"] == "https://mcp.notion.com/mcp"
     assert spec["headers"]["Authorization"] == "Bearer ntn_xxx"
     assert spec["headers"]["Accept"] == "application/json, text/event-stream"
+    assert spec["headers"]["User-Agent"] == "octop-connector/0.1"
+
+
+def test_mcp_oauth_remote_catalog_helpers():
+    from octop.infra.connectors.catalog import (
+        get_mcp_oauth_remote,
+        is_mcp_oauth_remote,
+        mcp_oauth_remote_kinds,
+    )
+    from octop.infra.connectors.oauth.mcp import resource_for_kind
+
+    notion = get_catalog_entry("notion")
+    ardot = get_catalog_entry("tencent-ardot")
+    dida = get_catalog_entry("dida365")
+    assert notion is not None and ardot is not None and dida is not None
+    assert is_mcp_oauth_remote(notion)
+    assert is_mcp_oauth_remote(ardot)
+    assert is_mcp_oauth_remote(dida)
+    assert mcp_oauth_remote_kinds() >= {"notion", "tencent-ardot", "dida365"}
+    assert get_mcp_oauth_remote("notion") is notion
+    assert get_mcp_oauth_remote("tencent-docs") is None
+    assert resource_for_kind("tencent-ardot") == "https://ardot.tencent.com/mcp"
+    assert resource_for_kind("dida365") == "https://mcp.dida365.com/"
+    assert resource_for_kind("notion") is None
+    assert dida.mcp_url == "https://mcp.dida365.com"
+    assert dida.oauth_scopes == "tasks:read tasks:write"
+
+
+def test_mcp_oauth_scopes_prefer_metadata_then_catalog():
+    from octop.infra.connectors.oauth.registry import _scopes_for_kind
+
+    assert _scopes_for_kind("dida365", {"scopes_supported": ["a", "b"]}) == "a b"
+    assert _scopes_for_kind("dida365", {}) == "tasks:read tasks:write"
+    assert _scopes_for_kind("notion", {}) is None
+
+
+def test_oauth2_accepts_token_alias_for_access_token():
+    payload = validate_create_credentials("dida365", {"token": "paste-tok"})
+    assert payload == {"access_token": "paste-tok"}
+
+
+def test_build_dida365_remote_spec():
+    entry = get_catalog_entry("dida365")
+    assert entry is not None
+    assert entry.name == "滴答清单"
+    assert entry.auth_kind == "oauth2"
+    spec = build_http_mcp_spec(
+        entry=entry,
+        instance_id="x",
+        creds={"access_token": "dida-tok"},
+        config=OctopConfig(),
+    )
+    assert spec["transport"] == "http"
+    assert spec["url"] == "https://mcp.dida365.com"
+    assert spec["headers"]["Authorization"] == "Bearer dida-tok"
+    assert spec["headers"]["Accept"] == "application/json, text/event-stream"
+
+
+def test_weknora_catalog_and_credentials():
+    from octop.infra.connectors.catalog import catalog_entry_to_dict
+
+    entry = get_catalog_entry("weknora")
+    assert entry is not None
+    assert entry.mcp_mode == "gateway"
+    data = catalog_entry_to_dict(entry)
+    fields = {item["key"]: item for item in data["credential_fields"]}
+    assert fields["base_url"]["field_type"] == "url"
+    assert fields["api_key"]["secret"] is True
+
+    payload = validate_create_credentials(
+        "weknora",
+        {
+            "base_url": "http://127.0.0.1:8080/",
+            "api_key": "sk-secret",
+            "tenant_id": "tenant-1",
+            "knowledge_base_ids": "kb-1, kb-2, kb-1",
+        },
+    )
+    assert payload["base_url"] == "http://127.0.0.1:8080/api/v1"
+    assert payload["api_key"] == "sk-secret"
+    assert payload["tenant_id"] == "tenant-1"
+    assert payload["knowledge_base_ids"] == ["kb-1", "kb-2"]
+    assert payload["internal_token"]
+
+
+def test_weknora_rejects_non_https_remote_url():
+    with pytest.raises(ValueError, match="non-local url must use https"):
+        validate_create_credentials(
+            "weknora",
+            {"base_url": "http://weknora.example.com", "api_key": "sk-secret"},
+        )
+    with pytest.raises(ValueError, match="query string or fragment"):
+        validate_create_credentials(
+            "weknora",
+            {"base_url": "https://weknora.example.com?token=secret"},
+        )
+
+
+def test_dify_builds_streamable_http_spec():
+    entry = get_catalog_entry("dify")
+    assert entry is not None
+    assert entry.remote_transport == "streamable_http"
+    creds = validate_create_credentials(
+        "dify",
+        {"mcp_url": "https://dify.example.com/mcp/server/server-code/mcp"},
+    )
+    spec = build_http_mcp_spec(
+        entry=entry,
+        instance_id="x",
+        creds=creds,
+        config=OctopConfig(),
+    )
+    assert spec == {
+        "transport": "http",
+        "url": "https://dify.example.com/mcp/server/server-code/mcp",
+        "headers": {"Accept": "application/json, text/event-stream"},
+    }
+
+
+def test_dify_rejects_non_server_url():
+    with pytest.raises(ValueError, match="Dify MCP Server URL"):
+        validate_create_credentials("dify", {"mcp_url": "https://dify.example.com/v1/chat"})
+
+
+def test_dify_server_code_is_redacted_from_logs():
+    from octop.infra.connectors.builder import _redact_mcp_configs_for_log
+
+    redacted = _redact_mcp_configs_for_log(
+        {
+            "dify__x": {
+                "transport": "http",
+                "url": "https://dify.example.com/mcp/server/secret-code/mcp",
+            }
+        }
+    )
+    assert redacted["dify__x"]["url"] == "https://dify.example.com/mcp/server/***/mcp"
+
+
+def test_custom_field_preview_redacts_secrets():
+    from octop.api.routers.connectors import _credentials_preview
+
+    weknora = _credentials_preview(
+        "weknora",
+        {
+            "base_url": "https://weknora.example.com/api/v1",
+            "api_key": "sk-secret",
+            "tenant_id": "tenant-1",
+            "knowledge_base_ids": ["kb-1"],
+        },
+    )
+    assert weknora == {
+        "base_url": "https://weknora.example.com/api/v1",
+        "api_key_configured": True,
+        "tenant_id": "tenant-1",
+        "knowledge_base_ids": ["kb-1"],
+    }
+    dify = _credentials_preview(
+        "dify",
+        {"mcp_url": "https://dify.example.com/mcp/server/secret-code/mcp"},
+    )
+    assert dify == {"mcp_url_configured": True}
+
+
+def test_gateway_weknora_tools_and_search(monkeypatch: pytest.MonkeyPatch):
+    from octop.infra.connectors.gateway.adapters import weknora
+
+    calls: list[tuple[str, str, dict[str, object] | None]] = []
+
+    def _fake_request(
+        _creds: dict[str, object],
+        method: str,
+        path: str,
+        *,
+        params: dict[str, object] | None = None,
+        body: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        calls.append((method, path, body))
+        if path == "/knowledge-bases":
+            return {"success": True, "data": [{"id": "kb-1", "name": "Docs"}]}
+        assert params == {"resource_urls": "handle"}
+        return {
+            "success": True,
+            "data": [
+                {
+                    "knowledge_id": "doc-1",
+                    "knowledge_title": "Guide",
+                    "chunk_index": 2,
+                    "score": 0.9,
+                    "content": "x" * 1300,
+                }
+            ],
+        }
+
+    monkeypatch.setattr(weknora, "_request", _fake_request)
+    listed = handle_mcp_request(
+        kind="weknora",
+        creds={"base_url": "http://127.0.0.1:8080/api/v1"},
+        body={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+    )
+    assert [tool["name"] for tool in listed["result"]["tools"]] == [
+        "list_knowledge_bases",
+        "search",
+        "read_document",
+    ]
+    result = json.loads(
+        weknora.call_tool(
+            {"base_url": "http://127.0.0.1:8080/api/v1"},
+            "search",
+            {"query": "install"},
+        )
+    )
+    assert result["knowledge_base_ids"] == ["kb-1"]
+    assert len(result["passages"][0]["content"]) == 1200
+    assert result["passages"][0]["truncated"] is True
+    assert calls[-1][2] == {"query": "install", "knowledge_base_ids": ["kb-1"]}
+
+
+@pytest.mark.asyncio
+async def test_dify_probe_uses_streamable_http(monkeypatch: pytest.MonkeyPatch):
+    from octop.infra.connectors.probe import probe_connector
+
+    seen: dict[str, object] = {}
+
+    async def _probe(url: str, headers: dict[str, str], *, kind: str) -> dict[str, object]:
+        seen.update(url=url, headers=headers, kind=kind)
+        return {"ok": True, "tool_count": 1, "tools": [{"name": "run", "description": ""}]}
+
+    monkeypatch.setattr("octop.infra.connectors.probe.probe_streamable_http_mcp", _probe)
+    entry = get_catalog_entry("dify")
+    assert entry is not None
+    result = await probe_connector(
+        entry,
+        {"mcp_url": "https://dify.example.com/mcp/server/code/mcp"},
+        instance_id="probe",
+        config=OctopConfig(),
+    )
+    assert result["ok"] is True
+    assert seen == {
+        "url": "https://dify.example.com/mcp/server/code/mcp",
+        "headers": {"Accept": "application/json, text/event-stream"},
+        "kind": "dify",
+    }
+
+
+@pytest.mark.asyncio
+async def test_detect_local_weknora_uses_fixed_loopback(monkeypatch: pytest.MonkeyPatch):
+    import httpx
+
+    from octop.infra.connectors import probe
+
+    seen: list[str] = []
+    real_client = httpx.AsyncClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        return httpx.Response(200, json={"status": "ok"})
+
+    def client_factory(**kwargs: object) -> httpx.AsyncClient:
+        kwargs.pop("trust_env", None)
+        return real_client(transport=httpx.MockTransport(handler), **kwargs)
+
+    monkeypatch.setattr(probe.httpx, "AsyncClient", client_factory)
+    result = await probe.detect_local_weknora()
+
+    assert result == {
+        "found": True,
+        "base_url": "http://127.0.0.1:8080/api/v1",
+        "console_url": "http://127.0.0.1",
+    }
+    assert seen == ["http://127.0.0.1:8080/health"]
+
+
+@pytest.mark.asyncio
+async def test_detect_local_weknora_returns_not_found_on_unhealthy_host(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import httpx
+
+    from octop.infra.connectors import probe
+
+    real_client = httpx.AsyncClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, request=request)
+
+    def client_factory(**kwargs: object) -> httpx.AsyncClient:
+        kwargs.pop("trust_env", None)
+        return real_client(transport=httpx.MockTransport(handler), **kwargs)
+
+    monkeypatch.setattr(probe.httpx, "AsyncClient", client_factory)
+    assert await probe.detect_local_weknora() == {"found": False}
 
 
 def test_gateway_tools_list():
@@ -747,6 +1041,130 @@ def test_build_tencent_meeting_remote_spec():
     assert spec["url"] == "https://mcp.meeting.tencent.com/mcp/wemeet-open/v1"
     assert spec["headers"]["X-Tencent-Meeting-Token"] == "tok"
     assert spec["headers"]["X-Skill-Version"] == "v1.0.1"
+
+
+def test_build_tencent_ardot_remote_spec():
+    entry = get_catalog_entry("tencent-ardot")
+    assert entry is not None
+    assert entry.name == "腾讯设计 Ardot"
+    assert entry.auth_kind == "oauth2"
+    spec = build_http_mcp_spec(
+        entry=entry,
+        instance_id="x",
+        creds={"access_token": "ardot-tok"},
+        config=OctopConfig(),
+    )
+    assert spec["transport"] == "http"
+    assert spec["url"] == "https://ardot.tencent.com/mcp"
+    assert spec["headers"]["Authorization"] == "Bearer ardot-tok"
+    assert spec["headers"]["Accept"] == "application/json, text/event-stream"
+
+
+def test_tencent_ardot_oauth_credentials():
+    payload = validate_create_credentials(
+        "tencent-ardot",
+        {"access_token": "ardot-tok"},
+    )
+    assert payload["access_token"] == "ardot-tok"
+
+
+def test_probe_tencent_ardot_routes_to_streamable(monkeypatch: pytest.MonkeyPatch):
+    from octop.infra.connectors.probe import probe_connector
+
+    captured: dict[str, object] = {}
+
+    async def _fake(url: str, headers: dict[str, str], *, kind: str) -> dict[str, object]:
+        captured["url"] = url
+        captured["headers"] = headers
+        captured["kind"] = kind
+        return {
+            "ok": True,
+            "tool_count": 1,
+            "tools": [{"name": "fetch_editor_state", "description": "Editor state"}],
+        }
+
+    monkeypatch.setattr("octop.infra.connectors.probe.probe_streamable_http_mcp", _fake)
+    entry = get_catalog_entry("tencent-ardot")
+    assert entry is not None
+
+    out = asyncio.run(
+        probe_connector(
+            entry,
+            {"access_token": "ardot-tok"},
+            instance_id="probe",
+            config=OctopConfig(),
+        )
+    )
+    assert captured["kind"] == "tencent-ardot"
+    assert captured["url"] == "https://ardot.tencent.com/mcp"
+    assert captured["headers"]["Authorization"] == "Bearer ardot-tok"
+    assert out["ok"] is True
+    assert out["tools"][0]["name"] == "fetch_editor_state"
+
+
+def test_oauth_ready_tencent_ardot():
+    from octop.infra.connectors.oauth import oauth_ready_for_kind
+
+    class _Settings:
+        def get(self, _key: str) -> str:
+            return ""
+
+    assert oauth_ready_for_kind("tencent-ardot", _Settings()) is True
+
+
+def test_ardot_token_exchange_includes_resource(monkeypatch: pytest.MonkeyPatch):
+    from octop.infra.connectors.oauth import mcp as oauth_mcp
+
+    captured: dict[str, object] = {}
+
+    class _Resp:
+        status_code = 200
+        text = ""
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {
+                "access_token": "tok",
+                "refresh_token": "ref",
+                "expires_in": 3600,
+            }
+
+    async def _fake_request(
+        method: str,
+        url: str,
+        *,
+        data: dict[str, str] | None = None,
+        **_kwargs: object,
+    ) -> _Resp:
+        del method, url
+        captured["data"] = dict(data or {})
+        return _Resp()
+
+    async def _fake_ensure(url: str, **_kwargs: object) -> str:
+        return url
+
+    monkeypatch.setattr(oauth_mcp, "safe_request", _fake_request)
+    monkeypatch.setattr(oauth_mcp, "_ensure_mcp_oauth_url", _fake_ensure)
+
+    out = asyncio.run(
+        oauth_mcp.exchange_authorization_code(
+            {
+                "token_endpoint": "https://ardot.tencent.com/oauth/token",
+            },
+            issuer="https://ardot.tencent.com",
+            client_id="cid",
+            client_secret=None,
+            code="code",
+            redirect_uri="http://127.0.0.1:9000/api/connectors/oauth/callback",
+            code_verifier="verifier",
+            resource="https://ardot.tencent.com/mcp",
+        )
+    )
+    assert out["access_token"] == "tok"
+    assert captured["data"]["resource"] == "https://ardot.tencent.com/mcp"
+    assert captured["data"]["code_verifier"] == "verifier"
 
 
 def test_build_youdao_remote_spec():

@@ -87,6 +87,7 @@ const QUICK_CONFIG_CHANNELS: ChannelKey[] = [
   "qq",
   "wecom",
   "weixin",
+  "dingtalk",
   "feishu",
   "yuanbao",
 ];
@@ -114,6 +115,12 @@ type QrPhase =
       token: string;
       baseUrl: string;
     }
+  | {
+      phase: "dingtalk_ready";
+      qrcodeUrl: string;
+      userCode: string;
+    }
+  | { phase: "dingtalk_success"; channelId: string }
   | { phase: "feishu_creating"; message: string }
   | { phase: "feishu_qr"; qrToken: string }
   | { phase: "feishu_progress"; message: string }
@@ -146,6 +153,7 @@ interface ChannelDrawerProps {
     config: Record<string, unknown>,
     enabled: boolean,
   ) => Promise<boolean>;
+  onProvisioned: () => void;
   onTest?: () => void;
   testing?: boolean;
   agentId: string;
@@ -456,6 +464,7 @@ export function ChannelDrawer({
   deleting,
   onClose,
   onSubmit,
+  onProvisioned,
   onTest,
   testing,
   agentId,
@@ -640,6 +649,61 @@ export function ChannelDrawer({
       });
     }
   }, [agentId, stopPolling]);
+
+  // ── DingTalk Flow ───────────────────────────────────────────────────────
+  const startDingtalkQr = useCallback(async () => {
+    setQrState({ phase: "loading" });
+    try {
+      const res = await channelApi.dingtalkQrcodeGenerate(agentId);
+      setQrState({
+        phase: "dingtalk_ready",
+        qrcodeUrl: res.qrcode_url,
+        userCode: res.user_code,
+      });
+      let polling = false;
+      const timer = setInterval(
+        async () => {
+          if (polling) return;
+          polling = true;
+          try {
+            const poll = await channelApi.dingtalkQrcodePoll(
+              agentId,
+              res.registration_id,
+            );
+            if (poll.status === "success" && poll.channel_id) {
+              stopPolling();
+              setQrState({
+                phase: "dingtalk_success",
+                channelId: poll.channel_id,
+              });
+              onProvisioned();
+            } else if (poll.status === "failed" || poll.status === "expired") {
+              stopPolling();
+              setQrState({
+                phase: "error",
+                reason:
+                  poll.message ??
+                  (poll.status === "expired"
+                    ? t("channels.dingtalkQrExpired")
+                    : t("channels.dingtalkQrFailed")),
+              });
+            }
+          } catch {
+            // Transient network error: keep polling until DingTalk expires the flow.
+          } finally {
+            polling = false;
+          }
+        },
+        Math.max(1000, res.interval * 1000),
+      );
+      pollTimerRef.current = timer;
+    } catch (e: unknown) {
+      setQrState({
+        phase: "error",
+        reason: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }, [agentId, onProvisioned, stopPolling, t]);
 
   // ── Feishu Flow ─────────────────────────────────────────────────────────
   const startFeishuCreator = useCallback(
@@ -958,7 +1022,7 @@ export function ChannelDrawer({
         >
           <Spin size="small" />
           <span style={{ color: "var(--fn-text-secondary)", fontSize: 13 }}>
-            正在自动保存...
+            {t("channels.qrAutoSaving")}
           </span>
         </div>
       );
@@ -980,7 +1044,7 @@ export function ChannelDrawer({
           }}
           style={{ marginTop: 12 }}
         >
-          重试保存
+          {t("channels.qrRetrySave")}
         </Button>
       );
     }
@@ -1203,7 +1267,7 @@ export function ChannelDrawer({
           </div>
           <p className={styles.qrScanHint}>扫码后自动跳转下一步</p>
           <Button size="small" onClick={resetQr} style={{ marginTop: 4 }}>
-            重新生成
+            {t("channels.qrRegenerate")}
           </Button>
         </div>
       );
@@ -1216,7 +1280,9 @@ export function ChannelDrawer({
             message={s.reason}
             style={{ width: "100%", marginBottom: 12 }}
           />
-          <Button onClick={() => void startWecomQr()}>重试</Button>
+          <Button onClick={() => void startWecomQr()}>
+            {t("channels.qrRetryBtn")}
+          </Button>
         </div>
       );
     }
@@ -1242,7 +1308,7 @@ export function ChannelDrawer({
           block
           onClick={() => void startWecomQr()}
         >
-          生成扫码二维码
+          {t("channels.wecomGenerateQr")}
         </Button>
       </div>
     );
@@ -1307,7 +1373,7 @@ export function ChannelDrawer({
           </div>
           <p className={styles.qrScanHint}>使用微信扫码登录个人账号</p>
           <Button size="small" onClick={resetQr} style={{ marginTop: 4 }}>
-            重新生成
+            {t("channels.qrRegenerate")}
           </Button>
         </div>
       );
@@ -1320,7 +1386,9 @@ export function ChannelDrawer({
             message={s.reason}
             style={{ width: "100%", marginBottom: 12 }}
           />
-          <Button onClick={() => void startWeixinQr()}>重试</Button>
+          <Button onClick={() => void startWeixinQr()}>
+            {t("channels.qrRetryBtn")}
+          </Button>
         </div>
       );
     }
@@ -1344,7 +1412,106 @@ export function ChannelDrawer({
           block
           onClick={() => void startWeixinQr()}
         >
-          生成微信扫码二维码
+          {t("channels.weixinGenerateQr")}
+        </Button>
+      </div>
+    );
+  }
+
+  function renderDingtalkPanel() {
+    const s = qrState;
+    if (s.phase === "loading") {
+      return (
+        <div className={styles.qrPanel}>
+          <Spin />
+          <p className={styles.qrScanHint}>{t("channels.dingtalkQrLoading")}</p>
+        </div>
+      );
+    }
+    if (s.phase === "dingtalk_success") {
+      return (
+        <div className={styles.qrPanel}>
+          <Alert
+            type="success"
+            message={t("channels.dingtalkBindSuccess")}
+            style={{ width: "100%" }}
+          />
+        </div>
+      );
+    }
+    if (s.phase === "dingtalk_ready") {
+      return (
+        <div className={styles.qrPanel}>
+          <div className={styles.qrSteps}>
+            <span className={styles.qrStep}>
+              <span className={styles.qrDot}>1</span>
+              {t("channels.dingtalkQrStep1")}
+            </span>
+            <span className={styles.qrStepDivider} />
+            <span className={styles.qrStep}>
+              <span className={styles.qrDot}>2</span>
+              {t("channels.dingtalkQrStep2")}
+            </span>
+            <span className={styles.qrStepDivider} />
+            <span className={styles.qrStep}>
+              <span className={styles.qrDot}>3</span>
+              {t("channels.dingtalkQrStep3")}
+            </span>
+          </div>
+          <div className={styles.qrCardWrap}>
+            <div className={styles.qrFrame}>
+              <QRCodeSVG value={s.qrcodeUrl} size={200} />
+            </div>
+          </div>
+          <p className={styles.qrScanHint}>
+            {t("channels.dingtalkQrScanHint")}
+          </p>
+          <p className={styles.qrScanHint}>
+            {t("channels.dingtalkUserCode")}: <code>{s.userCode}</code>
+          </p>
+          <Button size="small" onClick={resetQr} style={{ marginTop: 4 }}>
+            {t("channels.qrRegenerate")}
+          </Button>
+        </div>
+      );
+    }
+    if (s.phase === "error") {
+      return (
+        <div className={styles.qrPanel}>
+          <Alert
+            type="error"
+            message={s.reason}
+            style={{ width: "100%", marginBottom: 12 }}
+          />
+          <Button onClick={() => void startDingtalkQr()}>
+            {t("channels.qrRetryBtn")}
+          </Button>
+        </div>
+      );
+    }
+    return (
+      <div className={styles.quickConfigPanel}>
+        <div className={styles.quickConfigSteps}>
+          <div className={styles.quickConfigStep}>
+            <span className={styles.stepNumber}>1</span>
+            {t("channels.dingtalkQrIntro1")}
+          </div>
+          <div className={styles.quickConfigStep}>
+            <span className={styles.stepNumber}>2</span>
+            {t("channels.dingtalkQrIntro2")}
+          </div>
+          <div className={styles.quickConfigStep}>
+            <span className={styles.stepNumber}>3</span>
+            {t("channels.dingtalkQrIntro3")}
+          </div>
+        </div>
+        <Button
+          type="primary"
+          className={styles.quickConfigBtn}
+          block
+          onClick={() => void startDingtalkQr()}
+        >
+          {t("channels.dingtalkGenerateQr")}
         </Button>
       </div>
     );
@@ -1587,7 +1754,11 @@ export function ChannelDrawer({
               style={{ width: 22, height: 22 }}
             />
           )}
-          <span>{isEdit ? `${kindLabel} 频道设置` : "新建频道"}</span>
+          <span>
+            {isEdit
+              ? `${kindLabel} ${t("channels.channelSettings")}`
+              : t("channels.createChannel")}
+          </span>
         </div>
       }
       open={open}
@@ -1677,6 +1848,7 @@ export function ChannelDrawer({
                 {selectedKind === "qq" && renderQqPanel()}
                 {selectedKind === "wecom" && renderWecomPanel()}
                 {selectedKind === "weixin" && renderWeixinPanel()}
+                {selectedKind === "dingtalk" && renderDingtalkPanel()}
                 {selectedKind === "feishu" && renderFeishuPanel()}
                 {selectedKind === "yuanbao" && renderYuanbaoPanel()}
               </>
@@ -1705,7 +1877,7 @@ export function ChannelDrawer({
 
               <Form.Item
                 name="kind"
-                label="频道类型"
+                label={t("channels.channelType")}
                 rules={[{ required: true }]}
               >
                 <Select

@@ -10,6 +10,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import {
   Alert,
+  App,
   Button,
   Drawer,
   Modal,
@@ -20,7 +21,6 @@ import {
   Tooltip,
   Typography,
 } from "antd";
-import { message as antMessage } from "@/utils/antdMessage";
 
 import {
   Bot,
@@ -310,6 +310,7 @@ export default function RemoteBrowserPage({
   isVisible = true,
 }: RemoteBrowserPageProps) {
   const { t } = useTranslation();
+  const { modal, message: antMessage } = App.useApp();
   const isMobile = useIsMobile();
   const { activeAgent, activeAgentId, agents } = useAgent();
   const [searchParams] = useSearchParams();
@@ -610,7 +611,7 @@ export default function RemoteBrowserPage({
 
   const handleUninstall = useCallback(() => {
     if (!envStatus?.playwright_chromium || uninstalling) return;
-    Modal.confirm({
+    modal.confirm({
       title: t("remoteBrowser.uninstallTitle", "卸载远程浏览器"),
       content: t(
         "remoteBrowser.uninstallConfirm",
@@ -743,6 +744,33 @@ export default function RemoteBrowserPage({
     }
     clearCanvas(canvasRef.current);
   }, [disconnect]);
+
+  const shutdownBrowser = useCallback(() => {
+    const profile = profileIdRef.current || "default";
+    modal.confirm({
+      title: t("remoteBrowser.shutdownTitle", "关闭浏览器进程"),
+      content: t(
+        "remoteBrowser.shutdownConfirm",
+        "将结束本机 Chrome 进程并释放内存。登录状态会保留在磁盘，下次启动仍可复用。是否继续？",
+      ),
+      okText: t("remoteBrowser.stop", "关闭浏览器"),
+      okButtonProps: { danger: true },
+      cancelText: t("common.cancel"),
+      onOk: async () => {
+        try {
+          await browserApi.shutdown(profile);
+        } catch (err: unknown) {
+          showApiError(
+            err,
+            t("remoteBrowser.shutdownFailed", "关闭浏览器进程失败"),
+            t,
+          );
+          throw err;
+        }
+        closeSession();
+      },
+    });
+  }, [closeSession, modal, t]);
 
   const refreshView = useCallback(async () => {
     const profileId = profileIdRef.current;
@@ -1280,10 +1308,10 @@ export default function RemoteBrowserPage({
             icon={<Square size={14} />}
             onClick={() => {
               closeControlsDrawer();
-              closeSession();
+              shutdownBrowser();
             }}
           >
-            {t("remoteBrowser.stop", "停止")}
+            {t("remoteBrowser.stop", "关闭浏览器")}
           </Button>
         ) : null}
       </div>
@@ -1426,15 +1454,17 @@ export default function RemoteBrowserPage({
                             : t("skillRecordGuide.buttonLabel", "技能录制")}
                         </Button>
                       </Tooltip>
-                      <Tooltip title={t("remoteBrowser.stop", "停止")}>
+                      <Tooltip title={t("remoteBrowser.stop", "关闭浏览器")}>
                         <Button
                           size="small"
                           danger
                           icon={<Square size={14} />}
-                          onClick={closeSession}
-                          aria-label={t("remoteBrowser.stop", "停止")}
+                          onClick={shutdownBrowser}
+                          aria-label={t("remoteBrowser.stop", "关闭浏览器")}
                         >
-                          {isMobile ? null : t("remoteBrowser.stop", "停止")}
+                          {isMobile
+                            ? null
+                            : t("remoteBrowser.stop", "关闭浏览器")}
                         </Button>
                       </Tooltip>
                     </>

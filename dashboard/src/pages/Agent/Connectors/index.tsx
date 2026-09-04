@@ -19,6 +19,7 @@ import PageShell from "../../../layouts/PageShell";
 import { useCurrentUser } from "../../../hooks/useCurrentUser";
 import { userCan } from "../../../utils/permissions";
 import { apiErrorMessage } from "../../../utils/apiError";
+import { copyText } from "../../../utils/copyText";
 import {
   clearFormDraft,
   loadFormDraft,
@@ -43,6 +44,11 @@ import {
   mailProviderById,
 } from "./connectorDefs";
 import { notifyConnectorsChanged } from "./customMcpUtils";
+import {
+  extractHttpUrl,
+  isDifyMcpServerUrl,
+  isGuidedConnector,
+} from "./guidedConnectorUtils";
 import { useConnectorInstances } from "./useConnectors";
 import styles from "./index.module.less";
 
@@ -108,6 +114,18 @@ function buildCredentials(
     credentials.sdk_id = values.sdk_id;
     const secret_key = String(values.secret_key ?? "").trim();
     if (secret_key) credentials.secret_key = secret_key;
+  } else if (entry.auth_kind === "custom_fields") {
+    for (const field of entry.credential_fields ?? []) {
+      const text = String(values[field.key] ?? "").trim();
+      if (!text) continue;
+      credentials[field.key] =
+        field.field_type === "tags"
+          ? text
+              .split(",")
+              .map((item) => item.trim())
+              .filter(Boolean)
+          : text;
+    }
   }
   return credentials;
 }
@@ -145,6 +163,17 @@ function previewToFormValues(
   if (entry.auth_kind === "oauth2" && preview.oauth_configured) {
     values.access_token = "__configured__";
   }
+  if (entry.auth_kind === "custom_fields") {
+    for (const field of entry.credential_fields ?? []) {
+      if (field.secret) continue;
+      const value = preview[field.key];
+      if (Array.isArray(value)) {
+        values[field.key] = value.join(", ");
+      } else if (value !== undefined && value !== null) {
+        values[field.key] = value;
+      }
+    }
+  }
   return values;
 }
 
@@ -177,7 +206,30 @@ function hasFreshCredentialInput(
   if (entry.auth_kind === "api_credentials") {
     return Boolean(String(values.secret_key ?? "").trim());
   }
+  if (entry.auth_kind === "custom_fields") {
+    return (entry.credential_fields ?? []).some(
+      (field) =>
+        field.secret && Boolean(String(values[field.key] ?? "").trim()),
+    );
+  }
   return false;
+}
+
+function customCredentialConfigChanged(
+  entry: ConnectorCatalogEntry,
+  values: Record<string, unknown>,
+  preview: ConnectorCredentialsPreview,
+): boolean {
+  if (entry.auth_kind !== "custom_fields") return false;
+  return (entry.credential_fields ?? []).some((field) => {
+    if (field.secret) return false;
+    const current = String(values[field.key] ?? "").trim();
+    const storedValue = preview[field.key];
+    const stored = Array.isArray(storedValue)
+      ? storedValue.join(", ")
+      : String(storedValue ?? "").trim();
+    return current !== stored;
+  });
 }
 
 function openAuthorizeLabel(
@@ -215,7 +267,7 @@ function secretFieldRules(required: boolean) {
 
 function configuredExtra(
   preview: ConnectorCredentialsPreview | undefined,
-  key: keyof ConnectorCredentialsPreview,
+  key: string,
   t: (key: string, fallback: string) => string,
 ) {
   if (!preview?.[key]) return undefined;
@@ -246,6 +298,7 @@ function ConnectorConfigDrawer({
   const [saving, setSaving] = useState(false);
   const [probing, setProbing] = useState(false);
   const [authorizing, setAuthorizing] = useState(false);
+  const [openingAuthorize, setOpeningAuthorize] = useState(false);
   const [showManual, setShowManual] = useState(false);
   const [authInfo, setAuthInfo] = useState<ConnectorAuthInfo | null>(null);
   const [instanceDetail, setInstanceDetail] =
@@ -258,6 +311,7 @@ function ConnectorConfigDrawer({
     null,
   );
   const [installingCli, setInstallingCli] = useState(false);
+  const [detectingLocalWeKnora, setDetectingLocalWeKnora] = useState(false);
   const [feishuUserAuth, setFeishuUserAuth] =
     useState<FeishuUserAuthStartResult | null>(null);
   const [feishuUserAuthBusy, setFeishuUserAuthBusy] = useState(false);
@@ -400,8 +454,24 @@ function ConnectorConfigDrawer({
     openUrl(url);
   };
 
-  const handleOpenAuthorize = () => {
-    openUrl(authInfo?.authorize_url);
+  const handleOpenAuthorize = async () => {
+    if (!entry) return;
+    setOpeningAuthorize(true);
+    try {
+      const { authorize_url } = await connectorsApi.authorizeUrl(entry.kind);
+      if (!authorize_url) {
+        message.error(t("connectors.authUrlMissing", "无法获取授权页地址"));
+        return;
+      }
+      openUrl(authorize_url);
+    } catch (e) {
+      console.error(e);
+      message.error(
+        apiErrorMessage(e, t("connectors.authUrlFailed", "打开授权页失败"), t),
+      );
+    } finally {
+      setOpeningAuthorize(false);
+    }
   };
 
   const handleOpenLogin = () => {
@@ -409,10 +479,10 @@ function ConnectorConfigDrawer({
   };
 
   const handleCopyInstallCommand = async (command: string) => {
-    try {
-      await navigator.clipboard.writeText(command);
+    const ok = await copyText(command);
+    if (ok) {
       message.success(t("connectors.cliInstallCopied", "安装命令已复制"));
-    } catch {
+    } else {
       message.error(
         t("connectors.clipboardDenied", "无法读取剪贴板，请手动粘贴"),
       );
@@ -667,6 +737,86 @@ function ConnectorConfigDrawer({
     }
   };
 
+  const handleGuidedPaste = async () => {
+    if (!entry || !isGuidedConnector(entry.kind)) return;
+    try {
+      const text = (await navigator.clipboard.readText()).trim();
+      if (!text) {
+        message.warning(t("connectors.clipboardEmpty", "剪贴板为空"));
+        return;
+      }
+      const pastedUrl = extractHttpUrl(text);
+      if (entry.kind === "dify") {
+        if (!pastedUrl) {
+          message.warning(
+            t("connectors.difyPasteUrlRequired", "剪贴板中没有 MCP URL"),
+          );
+          return;
+        }
+        form.setFieldValue("mcp_url", pastedUrl);
+        await form.validateFields(["mcp_url"]);
+      } else if (pastedUrl) {
+        form.setFieldValue("base_url", pastedUrl);
+      } else {
+        form.setFieldValue("api_key", text);
+      }
+      saveFormDraft(
+        draftScope,
+        form.getFieldsValue() as Record<string, unknown>,
+      );
+      message.success(t("connectors.pasteSuccess", "已粘贴"));
+    } catch (error) {
+      if (error && typeof error === "object" && "errorFields" in error) {
+        message.warning(
+          t(
+            "connectors.difyMcpUrlInvalid",
+            "请粘贴 Dify 访问点提供的完整 MCP Server URL",
+          ),
+        );
+        return;
+      }
+      message.error(
+        t("connectors.clipboardDenied", "无法读取剪贴板，请手动粘贴"),
+      );
+    }
+  };
+
+  const handleDetectLocalWeKnora = async () => {
+    if (detectingLocalWeKnora) return;
+    setDetectingLocalWeKnora(true);
+    try {
+      const result = await connectorsApi.detectLocalWeKnora();
+      if (!result.found || !result.base_url) {
+        message.warning(
+          t(
+            "connectors.weknoraNotFound",
+            "未在 OCTOP 主机的 127.0.0.1:8080 检测到 WeKnora",
+          ),
+        );
+        return;
+      }
+      form.setFieldValue("base_url", result.base_url);
+      saveFormDraft(
+        draftScope,
+        form.getFieldsValue() as Record<string, unknown>,
+      );
+      message.success(
+        t("connectors.weknoraFound", "已检测到本机 WeKnora 并填入地址"),
+      );
+    } catch (error) {
+      console.error(error);
+      message.error(
+        apiErrorMessage(
+          error,
+          t("connectors.weknoraDetectFailed", "检测本机 WeKnora 失败"),
+          t,
+        ),
+      );
+    } finally {
+      setDetectingLocalWeKnora(false);
+    }
+  };
+
   const handleOAuth = async () => {
     if (!entry || authorizing) return;
     const popup = window.open("", "octop-oauth", "width=520,height=720");
@@ -681,43 +831,131 @@ function ConnectorConfigDrawer({
     }
 
     setAuthorizing(true);
+    let settled = false;
+    let pollTimer: ReturnType<typeof setInterval> | undefined;
+    let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+    let stateId = "";
+
+    const cleanup = () => {
+      if (pollTimer !== undefined) clearInterval(pollTimer);
+      if (timeoutTimer !== undefined) clearTimeout(timeoutTimer);
+      window.removeEventListener("message", onMessage);
+    };
+
+    const finishWithTokens = async (tokens: Record<string, unknown>) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      try {
+        popup.close();
+      } catch {
+        // ignore
+      }
+      try {
+        const values = form.getFieldsValue();
+        const credentials: Record<string, unknown> = {};
+        if (tokens.access_token) credentials.access_token = tokens.access_token;
+        if (tokens.refresh_token)
+          credentials.refresh_token = tokens.refresh_token;
+        if (tokens.expires_at) credentials.expires_at = tokens.expires_at;
+        if (tokens.oauth_client_id)
+          credentials.oauth_client_id = tokens.oauth_client_id;
+        if (tokens.oauth_client_secret)
+          credentials.oauth_client_secret = tokens.oauth_client_secret;
+        if (tokens.openid) credentials.openid = tokens.openid;
+
+        if (!credentials.access_token) {
+          message.error(t("connectors.oauthFailed", "获取授权结果失败"));
+          return;
+        }
+
+        await connectorsApi.createInstance({
+          kind: entry.kind,
+          display_name: String(values.display_name || entry.name),
+          credentials,
+          default_open: values.default_open === true,
+        });
+        clearFormDraft(draftScope);
+        message.success(t("connectors.createSuccess", "连接器已创建"));
+        onSaved();
+        onClose();
+      } catch (e) {
+        console.error(e);
+        form.setFieldsValue({
+          display_name: entry.name,
+          access_token: tokens.access_token,
+          refresh_token: tokens.refresh_token,
+          expires_at: tokens.expires_at,
+          oauth_client_id: tokens.oauth_client_id,
+          oauth_client_secret: tokens.oauth_client_secret,
+          openid: tokens.openid,
+        });
+        message.error(
+          apiErrorMessage(e, t("connectors.createFailed", "创建失败"), t),
+        );
+      } finally {
+        setAuthorizing(false);
+      }
+    };
+
+    const claimPending = async () => {
+      if (settled || !stateId) return;
+      try {
+        const pending = await connectorsApi.oauthPending(stateId);
+        await finishWithTokens(pending.tokens ?? {});
+      } catch {
+        // Pending not ready yet (404) — keep polling.
+      }
+    };
+
+    const onMessage = (ev: MessageEvent) => {
+      if (ev.origin !== window.location.origin) return;
+      if (ev.data?.type !== "octop:connector-oauth") return;
+      if (ev.data.state_id !== stateId) return;
+      void claimPending();
+    };
+
     try {
       const { authorize_url, state_id } = await connectorsApi.oauthStart(
-        entry.kind,
+        { type: "catalog", kind: entry.kind },
         "/connectors",
       );
-      const onMessage = async (ev: MessageEvent) => {
-        if (ev.origin !== window.location.origin) return;
-        if (ev.data?.type !== "octop:connector-oauth") return;
-        if (ev.data.state_id !== state_id) return;
-        window.removeEventListener("message", onMessage);
-        popup.close();
-        try {
-          const pending = await connectorsApi.oauthPending(state_id);
-          const tokens = pending.tokens ?? {};
-          form.setFieldsValue({
-            display_name: entry.name,
-            access_token: tokens.access_token,
-            refresh_token: tokens.refresh_token,
-            expires_at: tokens.expires_at,
-            oauth_client_id: tokens.oauth_client_id,
-            oauth_client_secret: tokens.oauth_client_secret,
-            openid: tokens.openid,
-          });
-          message.success(t("connectors.oauthSuccess", "授权成功，请保存连接"));
-        } catch {
-          message.error(t("connectors.oauthFailed", "获取授权结果失败"));
-        }
-      };
+      stateId = state_id;
       window.addEventListener("message", onMessage);
+      // Ardot (and some IdPs) set COOP so window.opener is null after redirect;
+      // poll pending so the parent still claims tokens without postMessage.
+      pollTimer = setInterval(() => {
+        void claimPending();
+      }, 1500);
+      timeoutTimer = setTimeout(
+        () => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          try {
+            popup.close();
+          } catch {
+            // ignore
+          }
+          setAuthorizing(false);
+          message.error(
+            t("connectors.oauthTimedOut", "授权超时，请重试一键授权"),
+          );
+        },
+        5 * 60 * 1000,
+      );
       popup.location.replace(authorize_url);
     } catch (e) {
-      popup.close();
+      cleanup();
+      try {
+        popup.close();
+      } catch {
+        // ignore
+      }
       console.error(e);
       message.error(
         apiErrorMessage(e, t("connectors.oauthStartFailed", "无法启动 OAuth")),
       );
-    } finally {
       setAuthorizing(false);
     }
   };
@@ -737,17 +975,35 @@ function ConnectorConfigDrawer({
       Boolean(preview.bot_id) &&
       String(values.bot_id ?? "").trim() !==
         String(preview.bot_id ?? "").trim();
-    const identityChanged = feishuAppIdChanged || wecomBotIdChanged;
-    if (identityChanged && !freshSecret) {
+    const customConfigChanged = customCredentialConfigChanged(
+      entry,
+      values,
+      preview,
+    );
+    const customHasStoredSecret = (entry.credential_fields ?? []).some(
+      (field) => field.secret && preview[`${field.key}_configured`] === true,
+    );
+    const identityChanged =
+      feishuAppIdChanged || wecomBotIdChanged || customConfigChanged;
+    if (
+      identityChanged &&
+      !freshSecret &&
+      (entry.auth_kind !== "custom_fields" || customHasStoredSecret)
+    ) {
       message.warning(
         entry.kind === "feishu-cli"
           ? t(
               "connectors.probeNeedSecretAfterAppIdChange",
               "App ID 已修改，请填写 App Secret 后再探测",
             )
-          : t(
+          : entry.kind === "wecom-cli"
+          ? t(
               "connectors.probeNeedSecretAfterBotIdChange",
               "Bot ID 已修改，请填写 Secret 后再探测",
+            )
+          : t(
+              "connectors.probeNeedSecretAfterConfigChange",
+              "连接配置已修改，请重新填写密钥后再探测",
             ),
       );
       return;
@@ -853,6 +1109,7 @@ function ConnectorConfigDrawer({
   const guideUrl = authInfo?.guide_url ?? entry.guide_url ?? entry.doc_url;
   const manualUrl = authInfo?.manual_url ?? entry.manual_url ?? guideUrl;
   const authHint = authInfo?.auth_hint ?? entry.auth_hint;
+  const guidedKind = isGuidedConnector(entry.kind) ? entry.kind : null;
 
   const preview = instanceDetail?.credentials_preview;
   const secretRequired = !hasStoredCredentials;
@@ -912,6 +1169,45 @@ function ConnectorConfigDrawer({
 
         {authHint && <div className={styles.authHint}>{authHint}</div>}
 
+        {guidedKind && (
+          <div className={styles.guidedSetup}>
+            <div className={styles.guidedSetupTitle}>
+              {t("connectors.guidedSetup", "快速接入")}
+            </div>
+            {guidedKind === "weknora" ? (
+              <ol>
+                <li>
+                  {t("connectors.weknoraStep1", "打开 WeKnora 并创建 API Key")}
+                </li>
+                <li>
+                  {t(
+                    "connectors.weknoraStep2",
+                    "检测本机服务，或手动填写部署地址",
+                  )}
+                </li>
+                <li>
+                  {t("connectors.guidedStepProbe", "粘贴凭证后探测并保存")}
+                </li>
+              </ol>
+            ) : (
+              <ol>
+                <li>
+                  {t("connectors.difyStep1", "在 Dify 中发布应用或工作流")}
+                </li>
+                <li>
+                  {t(
+                    "connectors.difyStep2",
+                    "在访问点启用 MCP 并复制完整 Server URL",
+                  )}
+                </li>
+                <li>
+                  {t("connectors.guidedStepProbe", "粘贴凭证后探测并保存")}
+                </li>
+              </ol>
+            )}
+          </div>
+        )}
+
         {guideUrl && !hideGuideLink && (
           <div className={styles.guideLinks}>
             <a href={guideUrl} target="_blank" rel="noreferrer">
@@ -921,6 +1217,27 @@ function ConnectorConfigDrawer({
         )}
 
         <div className={styles.quickAuthBar}>
+          {guidedKind && (
+            <>
+              {guidedKind === "weknora" && (
+                <Button
+                  icon={<RefreshCw size={14} />}
+                  loading={detectingLocalWeKnora}
+                  onClick={() => void handleDetectLocalWeKnora()}
+                >
+                  {t("connectors.detectLocal", "检测本机服务")}
+                </Button>
+              )}
+              <Button
+                icon={<ClipboardPaste size={14} />}
+                onClick={() => void handleGuidedPaste()}
+              >
+                {guidedKind === "dify"
+                  ? t("connectors.pasteMcpUrl", "粘贴 MCP 地址")
+                  : t("connectors.smartPaste", "智能粘贴")}
+              </Button>
+            </>
+          )}
           {entry && isHostCliConnector(entry.kind) && (
             <>
               {canInstallCli && (
@@ -1005,11 +1322,12 @@ function ConnectorConfigDrawer({
               {t("connectors.oneClickOAuth", "一键授权")}
             </Button>
           )}
-          {hasAuthorizeUrl && !hideTopAuth && (
+          {hasAuthorizeUrl && !hideTopAuth && !hasOAuthPopup && (
             <Button
               type="primary"
               icon={<ExternalLink size={14} />}
-              onClick={handleOpenAuthorize}
+              loading={openingAuthorize}
+              onClick={() => void handleOpenAuthorize()}
             >
               {t("connectors.openAuthorizePage", "打开授权页")}
             </Button>
@@ -1027,7 +1345,8 @@ function ConnectorConfigDrawer({
               <Button
                 type="primary"
                 icon={<ExternalLink size={14} />}
-                onClick={() => openUrl(entry.quick_auth_url)}
+                loading={openingAuthorize}
+                onClick={() => void handleOpenAuthorize()}
               >
                 {openAuthorizeLabel(entry.kind, t)}
               </Button>
@@ -1127,6 +1446,57 @@ function ConnectorConfigDrawer({
             <Input placeholder={entry.name} />
           </Form.Item>
 
+          {entry.auth_kind === "custom_fields" &&
+            (entry.credential_fields ?? []).map((field) => {
+              const isSecret = field.secret || field.field_type === "password";
+              const input = isSecret ? (
+                <Input.Password
+                  placeholder={
+                    hasStoredCredentials && field.secret
+                      ? t("connectors.secretPlaceholder", "留空表示不修改")
+                      : field.placeholder ?? undefined
+                  }
+                />
+              ) : (
+                <Input placeholder={field.placeholder ?? undefined} />
+              );
+              return (
+                <Form.Item
+                  key={field.key}
+                  name={field.key}
+                  label={field.label}
+                  rules={[
+                    ...(isSecret
+                      ? secretFieldRules(field.required && secretRequired)
+                      : [{ required: field.required }]),
+                    ...(entry.kind === "dify" && field.key === "mcp_url"
+                      ? [
+                          {
+                            validator: (_: unknown, value: unknown) =>
+                              !value || isDifyMcpServerUrl(String(value))
+                                ? Promise.resolve()
+                                : Promise.reject(
+                                    new Error(
+                                      t(
+                                        "connectors.difyMcpUrlInvalid",
+                                        "请粘贴 Dify 访问点提供的完整 MCP Server URL",
+                                      ),
+                                    ),
+                                  ),
+                          },
+                        ]
+                      : []),
+                  ]}
+                  extra={
+                    configuredExtra(preview, `${field.key}_configured`, t) ??
+                    field.help
+                  }
+                >
+                  {input}
+                </Form.Item>
+              );
+            })}
+
           {entry.auth_kind === "personal_token" && (
             <Form.Item
               name="token"
@@ -1134,15 +1504,15 @@ function ConnectorConfigDrawer({
               rules={secretFieldRules(secretRequired)}
               extra={
                 configuredExtra(preview, "token_configured", t) ??
-                (manualUrl ? (
+                (!hideFieldGuide && manualUrl ? (
                   <a href={manualUrl} target="_blank" rel="noreferrer">
                     {t("connectors.getTokenAt", "前往获取 Token")}
                   </a>
-                ) : (
+                ) : !hideFieldGuide ? (
                   <a href={entry.doc_url} target="_blank" rel="noreferrer">
                     {t("connectors.getToken", "获取 Token")}
                   </a>
-                ))
+                ) : undefined)
               }
             >
               <Input.Password
@@ -1448,7 +1818,7 @@ function ConnectorConfigDrawer({
                 >
                   {t(
                     "connectors.oauthHint",
-                    "点击「一键授权」完成登录后保存即可",
+                    "点击「一键授权」完成登录后将自动保存；也可手动粘贴 Token",
                   )}
                 </div>
               )}
@@ -1700,18 +2070,41 @@ export default function ConnectorsPage() {
     void (async () => {
       try {
         const pending = await connectorsApi.oauthPending(oauthState);
-        setDrawerEntry(catalog.find((c) => c.kind === pending.kind) ?? null);
-        setDrawerInstance(null);
-        message.info(
-          t("connectors.oauthCompleteHint", "请填写显示名称并保存连接"),
-        );
+        const kind = String(pending.kind || "");
+        const entry = catalog.find((c) => c.kind === kind);
+        const tokens = pending.tokens ?? {};
+        if (!entry || !tokens.access_token) {
+          message.error(t("connectors.oauthFailed", "获取授权结果失败"));
+          return;
+        }
+        const credentials: Record<string, unknown> = {
+          access_token: tokens.access_token,
+        };
+        if (tokens.refresh_token)
+          credentials.refresh_token = tokens.refresh_token;
+        if (tokens.expires_at) credentials.expires_at = tokens.expires_at;
+        if (tokens.oauth_client_id)
+          credentials.oauth_client_id = tokens.oauth_client_id;
+        if (tokens.oauth_client_secret)
+          credentials.oauth_client_secret = tokens.oauth_client_secret;
+        if (tokens.openid) credentials.openid = tokens.openid;
+
+        await connectorsApi.createInstance({
+          kind: entry.kind,
+          display_name: entry.name,
+          credentials,
+          default_open: false,
+        });
+        await refresh();
+        notifyConnectorsChanged();
+        message.success(t("connectors.createSuccess", "连接器已创建"));
       } catch {
         message.error(t("connectors.oauthFailed", "获取授权结果失败"));
       }
       searchParams.delete("oauth_state");
       setSearchParams(searchParams, { replace: true });
     })();
-  }, [searchParams, setSearchParams, catalog, t]);
+  }, [searchParams, setSearchParams, catalog, refresh, t]);
 
   const handleConfigure = useCallback(
     (entry: ConnectorCatalogEntry, instance: ConnectorInstance | null) => {

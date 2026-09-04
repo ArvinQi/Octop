@@ -10,6 +10,7 @@ import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router-dom";
 import { Popconfirm, Switch, Tag, Tooltip } from "antd";
 import { message } from "@/utils/antdMessage";
+import { copyText } from "@/utils/copyText";
 import { ResizableTable } from "@/components/ResizableTable";
 
 import type { ColumnsType } from "antd/es/table";
@@ -26,15 +27,18 @@ import {
   Sparkles,
   Notebook,
   Waypoints,
+  Wrench,
 } from "lucide-react";
 import WorkspaceDrawer from "../../Agent/Workspace/components/WorkspaceDrawer";
 import SubagentCatalogDrawer from "./SubagentCatalogDrawer";
 import SkillCatalogDrawer from "./SkillCatalogDrawer";
 import ChannelCatalogDrawer from "./ChannelCatalogDrawer";
 import MemoryCatalogDrawer from "./MemoryCatalogDrawer";
+import ToolCatalogDrawer from "./ToolCatalogDrawer";
 import { request } from "../../../api/request";
 import type { OctopAgent } from "../../../context/AgentContext";
 import { useAgent } from "../../../context/AgentContext";
+import { useIsMobile } from "../../../hooks/useIsMobile";
 import MbtiPersonaTag from "../../../components/MbtiPersonaTag";
 import MbtiCatalogDrawer from "./MbtiCatalogDrawer";
 import { ExpertIcon } from "./iconForName";
@@ -79,11 +83,15 @@ export default function AgentExpertsTable({
 }: AgentExpertsTableProps) {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const isMobile = useIsMobile();
   const { setActiveAgent, refresh: refreshAgents } = useAgent();
   const [localStates, setLocalStates] = useState<Record<string, string>>({});
   const [actionLoadingId, setActionLoadingId] = useState<string | null>(null);
   const [workspaceAgentId, setWorkspaceAgentId] = useState<string | null>(null);
   const [skillCatalogAgentId, setSkillCatalogAgentId] = useState<string | null>(
+    null,
+  );
+  const [toolSettingsAgentId, setToolSettingsAgentId] = useState<string | null>(
     null,
   );
   const [channelCatalogAgentId, setChannelCatalogAgentId] = useState<
@@ -106,6 +114,7 @@ export default function AgentExpertsTable({
   const [scrollY, setScrollY] = useState(360);
 
   useLayoutEffect(() => {
+    if (isMobile) return;
     const el = tableWrapRef.current;
     if (!el) return;
 
@@ -124,7 +133,7 @@ export default function AgentExpertsTable({
       ro.disconnect();
       window.removeEventListener("resize", update);
     };
-  }, [agents.length]);
+  }, [agents.length, isMobile]);
 
   const openMbtiCatalog = useCallback((agentId: string) => {
     setMbtiAgentId(agentId);
@@ -236,12 +245,9 @@ export default function AgentExpertsTable({
 
   const copyAgentId = useCallback(
     async (agentId: string) => {
-      try {
-        await navigator.clipboard.writeText(agentId);
-        message.success(t("common.copied"));
-      } catch {
-        message.error(t("common.copyFailed"));
-      }
+      const ok = await copyText(agentId);
+      if (ok) message.success(t("common.copied"));
+      else message.error(t("common.copyFailed"));
     },
     [t],
   );
@@ -264,7 +270,7 @@ export default function AgentExpertsTable({
       title: t("experts.table.name", "名称"),
       dataIndex: "name",
       width: 160,
-      fixed: "left",
+      fixed: isMobile ? undefined : "left",
       render: (name: string, row) => (
         <div className={styles.tableNameCell}>
           <span
@@ -382,7 +388,7 @@ export default function AgentExpertsTable({
       title: t("experts.table.actions", "操作"),
       key: "actions",
       width: 370,
-      fixed: "right",
+      fixed: isMobile ? undefined : "right",
       render: (_v, row) => {
         const state = localStates[row.agent_id] ?? row.state;
         const isTransient = TRANSIENT.has(state);
@@ -448,6 +454,16 @@ export default function AgentExpertsTable({
                     aria-label={t("experts.subagentsBtn")}
                   >
                     <Bot size={13} />
+                  </button>
+                </Tooltip>
+                <Tooltip title={t("experts.toolsBtn")} mouseEnterDelay={0.5}>
+                  <button
+                    type="button"
+                    className={styles.tableActionBtn}
+                    onClick={() => setToolSettingsAgentId(row.agent_id)}
+                    aria-label={t("experts.toolsBtn")}
+                  >
+                    <Wrench size={13} />
                   </button>
                 </Tooltip>
                 <Tooltip title={t("experts.channelsBtn")} mouseEnterDelay={0.5}>
@@ -546,7 +562,7 @@ export default function AgentExpertsTable({
           rowKey="agent_id"
           dataSource={agents}
           columns={columns}
-          scroll={{ x: 1370, y: scrollY }}
+          scroll={isMobile ? { x: 1370 } : { x: 1370, y: scrollY }}
           pagination={{
             defaultPageSize: 10,
             showSizeChanger: true,
@@ -564,6 +580,11 @@ export default function AgentExpertsTable({
         agentId={skillCatalogAgentId ?? ""}
         open={skillCatalogAgentId !== null}
         onClose={() => setSkillCatalogAgentId(null)}
+      />
+      <ToolCatalogDrawer
+        agentId={toolSettingsAgentId ?? ""}
+        open={toolSettingsAgentId !== null}
+        onClose={() => setToolSettingsAgentId(null)}
       />
       <ChannelCatalogDrawer
         agentId={channelCatalogAgentId ?? ""}

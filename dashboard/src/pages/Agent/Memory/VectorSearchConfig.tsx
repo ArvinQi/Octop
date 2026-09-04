@@ -1,7 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useTranslation } from "react-i18next";
-import { Select, Input, Button, Spin, Progress, Modal, Alert } from "antd";
-import { message } from "@/utils/antdMessage";
+import { App, Select, Input, Button, Spin, Progress, Alert } from "antd";
 
 import { Download, CheckCircle, AlertCircle } from "lucide-react";
 import api from "../../../api";
@@ -16,6 +15,7 @@ import styles from "./VectorSearchConfig.module.less";
 
 export default function VectorSearchConfig() {
   const { t } = useTranslation();
+  const { modal, message } = App.useApp();
 
   const [config, setConfig] = useState<EmbeddingConfig | null>(null);
   const [loading, setLoading] = useState(true);
@@ -102,7 +102,7 @@ export default function VectorSearchConfig() {
   /** Disable vector search in one action by applying provider=none immediately. */
   const handleDisableVectorSearch = useCallback(() => {
     if (!config || config.provider === "none") return;
-    Modal.confirm({
+    modal.confirm({
       title: t("memory.vs.disableVectorConfirmTitle"),
       content: t("memory.vs.disableVectorConfirmDesc"),
       okText: t("common.disable"),
@@ -181,12 +181,12 @@ export default function VectorSearchConfig() {
     const currentModel = config?.localModel || "";
     if (!currentModel) return;
 
-    Modal.confirm({
-      title: "删除模型缓存？",
-      content: `确定删除 ${currentModel} 的本地缓存吗？删除后需要重新下载才能再次启用向量检索。`,
-      okText: "删除",
+    modal.confirm({
+      title: t("memory.vs.deleteModelCacheTitle"),
+      content: t("memory.vs.deleteModelCacheDesc", { model: currentModel }),
+      okText: t("common.delete"),
       okType: "danger",
-      cancelText: "取消",
+      cancelText: t("common.cancel"),
       async onOk() {
         try {
           await api.deleteLocalModel(currentModel);
@@ -195,18 +195,16 @@ export default function VectorSearchConfig() {
             localStorage.setItem("lc_downloaded_models", JSON.stringify(next));
             return next;
           });
-          message.success("模型缓存已删除");
+          message.success(t("memory.vs.deleteModelCacheSuccess"));
           await refreshDownloadStatus();
         } catch (err) {
           // 409: current model is being activated, so the backend refuses deletion.
-          message.error(
-            "删除失败：当前模型可能正在激活中。请先切换/保存/重启后再删除。",
-          );
+          message.error(t("memory.vs.deleteModelCacheFailed"));
           console.error(err);
         }
       },
     });
-  }, [config?.localModel, refreshDownloadStatus]);
+  }, [config?.localModel, refreshDownloadStatus, t]);
 
   // Update a config field.
   const updateConfig = (field: keyof EmbeddingConfig, value: unknown) => {
@@ -554,12 +552,11 @@ export default function VectorSearchConfig() {
               className={styles.deleteBtn}
               style={{ marginTop: 12 }}
             >
-              删除模型
+              {t("memory.vs.deleteModelBtn")}
             </Button>
           )}
         </div>
       )}
-
       {/* Third-party service config block */}
       {config.provider === "custom" && (
         <div className={styles.card}>

@@ -1,4 +1,4 @@
-import { memo, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { ChevronRight } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import Markdown from "../../../components/Markdown/LazyMarkdown";
@@ -8,28 +8,44 @@ import { ToolDetailsInline } from "./MessageBubble";
 import styles from "../index.module.less";
 
 interface AssistantProcessSummaryProps {
+  /** Fold body: thinking + plain tools (pinned rich-UI tools excluded). */
   split: AssistantTurnSplit;
+  /**
+   * Full turn used for the summary counts. Pinned plugin UIs are siblings of
+   * this fold, but they still count as tool calls in the headline.
+   */
+  statsSplit?: AssistantTurnSplit;
   isStreaming?: boolean;
   onAcpPermissionSelect?: (message: string) => void;
-  /** When true, tool inline blocks skip image/video (shown on the turn strip). */
   hideToolMedia?: boolean;
   agentId?: string | null;
 }
 
+/** Foldable thinking + plain tools only (no rich plugin UI). */
 function AssistantProcessSummary({
   split,
+  statsSplit,
   isStreaming = false,
   onAcpPermissionSelect,
   hideToolMedia = false,
   agentId = null,
 }: AssistantProcessSummaryProps) {
   const { t } = useTranslation();
-  // Always collapsed by default — tools/thinking stay merged until the user opens them.
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(isStreaming);
+  const prevStreaming = useRef(isStreaming);
   const { toolCount, thinkingCount } = useMemo(
-    () => countProcessStats(split),
-    [split],
+    () => countProcessStats(statsSplit ?? split),
+    [statsSplit, split],
   );
+
+  // Follow the stream: expand while generating, collapse once the turn ends.
+  // Manual toggles hold until the next streaming transition; history renders
+  // with isStreaming=false and therefore stays collapsed.
+  useEffect(() => {
+    if (prevStreaming.current === isStreaming) return;
+    prevStreaming.current = isStreaming;
+    setExpanded(isStreaming);
+  }, [isStreaming]);
 
   if (toolCount === 0 && thinkingCount === 0) return null;
 

@@ -24,6 +24,7 @@ interface AgentBackendFieldsProps {
   pathMappings: PathMapping[];
   /** ``create`` fills empty root_dir with home; ``edit`` leaves existing values. */
   rootDirMode?: "create" | "edit";
+  disabled?: boolean;
   onAddPathMapping: () => void;
   onRemovePathMapping: (index: number) => void;
   onUpdatePathMapping: (
@@ -39,6 +40,7 @@ export default function AgentBackendFields({
   backendChoice,
   pathMappings,
   rootDirMode = "create",
+  disabled = false,
   onAddPathMapping,
   onRemovePathMapping,
   onUpdatePathMapping,
@@ -131,6 +133,7 @@ export default function AgentBackendFields({
         initialValue={DEFAULT_BACKEND}
       >
         <Select
+          disabled={disabled}
           loading={backendsLoading}
           options={backendSelectOptions}
           placeholder={t("experts.backendPlaceholder")}
@@ -167,29 +170,46 @@ export default function AgentBackendFields({
                 : undefined
             }
           >
-            <RootDirSelect treeRoot={treeRoot} />
+            <RootDirSelect
+              treeRoot={treeRoot}
+              disabled={disabled || rootDirMode === "edit"}
+            />
           </Form.Item>
           <div style={{ margin: "-8px 0 12px" }}>
-            <p
-              style={{
-                fontSize: 12,
-                color: "var(--fn-text-tertiary)",
-                margin: 0,
-              }}
-            >
-              {t("experts.backendRootDirDesc", {
-                home: fsDefaults?.home ?? "~",
-              })}
-            </p>
-            <p
-              style={{
-                fontSize: 12,
-                color: "var(--fn-text-tertiary)",
-                margin: "4px 0 0",
-              }}
-            >
-              {t("experts.backendRootDirJailHint")}
-            </p>
+            {rootDirMode === "edit" ? (
+              <p
+                style={{
+                  fontSize: 12,
+                  color: "var(--fn-text-tertiary)",
+                  margin: 0,
+                }}
+              >
+                {t("experts.backendRootDirImmutableHint")}
+              </p>
+            ) : (
+              <>
+                <p
+                  style={{
+                    fontSize: 12,
+                    color: "var(--fn-text-tertiary)",
+                    margin: 0,
+                  }}
+                >
+                  {t("experts.backendRootDirDesc", {
+                    home: fsDefaults?.home ?? "~",
+                  })}
+                </p>
+                <p
+                  style={{
+                    fontSize: 12,
+                    color: "var(--fn-text-tertiary)",
+                    margin: "4px 0 0",
+                  }}
+                >
+                  {t("experts.backendRootDirJailHint")}
+                </p>
+              </>
+            )}
           </div>
         </>
       )}
@@ -201,7 +221,7 @@ export default function AgentBackendFields({
             label={t("experts.backendModes.compositeDefault")}
             initialValue={DEFAULT_BACKEND}
           >
-            <Select options={routeBackendOptions} />
+            <Select disabled={disabled} options={routeBackendOptions} />
           </Form.Item>
 
           <div style={{ marginBottom: 16 }}>
@@ -228,6 +248,7 @@ export default function AgentBackendFields({
                 }}
               >
                 <Input
+                  disabled={disabled}
                   placeholder="/data"
                   value={mapping.path}
                   status={pathHasError(mapping.path) ? "error" : undefined}
@@ -237,6 +258,7 @@ export default function AgentBackendFields({
                   style={{ flex: 1 }}
                 />
                 <Select
+                  disabled={disabled}
                   placeholder={t("experts.backendModes.routeBackend")}
                   options={routeBackendOptions}
                   value={mapping.backend || undefined}
@@ -245,6 +267,7 @@ export default function AgentBackendFields({
                 />
                 <button
                   type="button"
+                  disabled={disabled}
                   onClick={() => onRemovePathMapping(i)}
                   style={{
                     background: "none",
@@ -261,6 +284,7 @@ export default function AgentBackendFields({
             <button
               type="button"
               className={styles.cardBtn}
+              disabled={disabled}
               onClick={onAddPathMapping}
             >
               {t("experts.addPathMapping")}

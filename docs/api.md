@@ -91,6 +91,9 @@ routes until the wizard finishes.
 | `POST`   | `/agents/{id}/read` | owner | `204` (mark unread badge cleared) |
 | `GET`    | `/agents/{id}/status` | owner | `{state, last_error?, ...}` |
 | `POST`   | `/agents/from-expert/{expert_id}` | user | body `{name, ...}` → `201` (creates from bundled expert template) |
+| `GET`    | `/agents/{id}/tool-settings` | owner | built-in + installed plugin tools with enable / disableable / available flags |
+| `PUT`    | `/agents/{id}/tool-settings` | owner | body `{disabled_builtin: string[], plugins?}` — persists denylist + plugin flags (hot-sync, no reload) |
+| `PATCH`  | `/agents/{id}/tool-settings/{tool_name}` | owner | body `{enabled, source, plugin_id?}` — toggle one tool (hot-sync) |
 
 ## Chat (WebSocket)
 
@@ -138,6 +141,7 @@ because each request is a one-shot continuation.
 | Method | Path | Auth | Notes |
 |--------|------|------|-------|
 | `GET`    | `/settings/timezone` | user | process-level `{timezone}` from `default_timezone` |
+| `GET`    | `/settings/upload` | user | `{max_upload_mb, max_upload_bytes}` from `max_upload_mb` |
 | `GET`    | `/cron/settings` | user | compat alias of `/settings/timezone` |
 | `GET`    | `/agents/{aid}/cron` | owner | list of cron rows |
 | `POST`   | `/agents/{aid}/cron` | owner | body `{trigger, prompt, session_key?, fresh_thread?, model?, task_type?}` → `201` |
@@ -174,6 +178,18 @@ documented in `infra/cron/trigger.py`. `prompt` must be non-empty and
 | `GET` | `/models` | user | resolved models across enabled providers |
 | `GET` | `/models/active` | user | `{provider_name, model}` |
 | `PUT` | `/models/active` | admin | body `{provider_name, model}` |
+
+### Media generation models
+
+These instance-wide endpoints require the `providers` permission (administrators bypass
+permission checks). The Ark API key is write-only and encrypted at rest. Saving settings
+reloads running agents so the image and video tools receive the new configuration.
+
+| Method | Path | Auth | Notes |
+|--------|------|------|-------|
+| `GET` | `/admin/media-generation` | providers | Return Volcengine Ark image/video settings; never returns the API key |
+| `PUT` | `/admin/media-generation` | providers | Save enabled tools and Seedream/Seedance model IDs; an included API key is verified before saving |
+| `POST` | `/admin/media-generation/test` | providers | Test credentials or a selected image/video model; model tests submit real, potentially billable requests |
 
 ## Voice
 
@@ -222,7 +238,7 @@ Bundled experts live in `src/octop/infra/agents/experts/library/`
 | `PUT`    | `/agents/{aid}/workspace/file` | owner | write a content file (via `BackendWorkspace`) |
 | `DELETE` | `/agents/{aid}/workspace/file` | owner | delete a content file |
 | `POST`   | `/agents/{aid}/workspace/rename` | owner | rename / move |
-| `POST`   | `/agents/{aid}/workspace/upload` | owner | multipart upload → backend |
+| `POST`   | `/agents/{aid}/workspace/upload` | owner | multipart upload → backend (not `max_upload_mb`) |
 | `GET`    | `/agents/{aid}/workspace/download` | owner | download a file |
 | `GET`    | `/agents/{aid}/workspace/glob` | owner | glob backend paths |
 | `GET`    | `/agents/{aid}/workspace/grep` | owner | grep backend files |
@@ -298,9 +314,18 @@ for non-`/` paths.
 | `GET`    | `/connectors/auth/{kind}/info` | user | auth flow info |
 | `GET`    | `/connectors/auth/{kind}/authorize-url` | user | build the authorize URL |
 | `POST`   | `/connectors/auth/{kind}/exchange-code` | user | exchange auth code |
-| `POST`   | `/connectors/oauth/{kind}/start` | user | start an OAuth flow |
+| `POST`   | `/connectors/oauth/start` | user | start OAuth (catalog or custom MCP via `target`) |
+| `POST`   | `/connectors/oauth/{kind}/start` | user | legacy catalog OAuth start |
+| `PUT`    | `/connectors/custom-mcp` | user | save custom MCP server map |
+| `PATCH`  | `/connectors/custom-mcp/servers/{name}` | user | patch `enabled` / `default_open` on one server |
+| `POST`   | `/connectors/custom-mcp/test` | user | probe a custom MCP server (inline spec or saved name) |
 | `GET`    | `/connectors/oauth/callback` | public | OAuth redirect target |
 | `GET`    | `/connectors/oauth/pending/{state_id}` | user | poll the OAuth result |
+
+Custom MCP OAuth (streamable HTTP, public HTTPS URL only): Octop discovers the authorization
+server from the MCP URL (401 / RFC 9728 protected-resource metadata), requires dynamic client
+registration (DCR), stores encrypted tokens in the custom MCP spec, and injects `Authorization:
+Bearer` when loading tools. Loopback MCP URLs do not use remote OAuth discovery.
 
 ## Internal MCP (harness agents)
 
@@ -339,6 +364,7 @@ endpoint (public, mounted directly in `api/app.py`).
 | `WS`/`POST`/`GET`/… | `/agents/{aid}/terminal` | owner | AI-assisted remote PTY |
 | `GET` | `/agents/{aid}/terminal/context` | owner | recent terminal context for the AI helper |
 | `WS`/`POST`/`GET`/… | `/browser/...` | user | remote Playwright sessions, screenshots, live streams |
+| `POST` | `/browser/shutdown` | user | stop the local Chrome process for a harness profile (`?profile=`) |
 | `POST` | `/agents/{aid}/upload` | user | multipart upload → `{workspace}/inbound/` |
 | `POST` | `/agents/{aid}/files/access-urls` | user | refresh inbound media URLs (signed) |
 | `GET`  | `/agents/{aid}/files/{path}` | owner | read an inbound file |
@@ -355,6 +381,10 @@ endpoint (public, mounted directly in `api/app.py`).
 | `GET`/`POST` | `/preferences` | user | UI preferences (per-user key/value) |
 | `GET` | `/slash/commands` | user | slash command catalog for the composer menu |
 | `GET`/`POST` | `/plugins` | user | installed plugin list / install flow |
+| `POST` | `/plugins/reload` | admin (`plugins`) | reload plugins from disk into process |
+| `PATCH` | `/plugins/{id}` | admin (`plugins`) | enable/disable plugin (`{ "enabled": bool }`) |
+| `GET` | `/plugins/{id}/ui/{path}` | user | serve prebuilt plugin UI assets (`ui/dist/…`) |
+| `DELETE` | `/plugins/{id}` | admin (`plugins`) | uninstall plugin |
 
 ## Usage & admin
 
@@ -411,6 +441,8 @@ dashboard mirrors every code under `apiErrors.*` in
 | `CRON_PROMPT_INVALID` | 400 | Empty or too-long prompt |
 | `SLASH_UNKNOWN` | 400 | `/<cmd>` is not a registered handler |
 | `SLASH_BAD_ARGS` | 400 | Slash handler rejected its arguments |
+| `ATTACHMENT_UNSUPPORTED_TYPE` | 400 | Chat / inbound attachment rejected (media type not allowed) |
+| `ATTACHMENT_TOO_LARGE` | 413 | Chat / inbound attachment exceeds the configured size limit (`max_mb` in details) |
 | `WORKSPACE_PATH_INVALID` | 400 | Path outside the agent's workspace |
 | `STORAGE_BACKEND_UNREACHABLE` | 502 | Remote backend connect / list failed |
 | `CONNECTOR_OAUTH_FAILED` | 400 | OAuth flow could not complete |

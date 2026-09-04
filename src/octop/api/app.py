@@ -52,6 +52,23 @@ def _dashboard_response(path: Path, full_path: str) -> FileResponse:
     return response
 
 
+def is_dashboard_asset_path(full_path: str) -> bool:
+    """True for hashed build artifacts that must 404 instead of falling back."""
+    return full_path.startswith("assets/")
+
+
+def _dashboard_fallback(index_file: Path, full_path: str) -> FileResponse:
+    """Serve the SPA shell for routes; 404 for a missing hashed asset.
+
+    Answering ``/assets/index.<old-hash>.js`` with ``index.html`` makes the
+    browser reject HTML as a module script ("not a valid JavaScript MIME
+    type"), which hides the real cause — a stale shell after an upgrade.
+    """
+    if is_dashboard_asset_path(full_path):
+        raise HTTPException(status_code=404, detail="Not Found")
+    return _dashboard_response(index_file, "")
+
+
 def _mount_routers(app: FastAPI, mounts: Sequence[_RouterMount]) -> None:
     for spec in mounts:
         app.include_router(spec.router, prefix=spec.prefix, tags=list(spec.tags))
@@ -128,6 +145,7 @@ def build_app(server: OctopServer) -> FastAPI:
         acp,
         admin,
         agent_files,
+        agent_tools,
         agents,
         auth,
         auth_oidc,
@@ -146,6 +164,7 @@ def build_app(server: OctopServer) -> FastAPI:
         invites,
         knowledge_bases,
         mbti,
+        media_generation,
         memory,
         memory_portable,
         mobile,
@@ -192,6 +211,7 @@ def build_app(server: OctopServer) -> FastAPI:
             _RouterMount(invites.admin_router, "/api/users/invites", ["users"]),
             _RouterMount(users.router, "/api/users", ["users"]),
             _RouterMount(agents.router, "/api/agents", ["agents"]),
+            _RouterMount(agent_tools.router, "/api", ["agents"]),
             _RouterMount(acp.router, "/api", ["agents"]),
             _RouterMount(chat.router, "/api", ["chat"]),
             _RouterMount(slash.router, "/api", ["slash"]),
@@ -210,6 +230,11 @@ def build_app(server: OctopServer) -> FastAPI:
             _RouterMount(admin_providers_router, "/api/admin/providers", ["admin"]),
             _RouterMount(admin_voice_router, "/api/admin/voice/providers", ["admin"]),
             _RouterMount(observability_router, "/api/admin/observability", ["observability"]),
+            _RouterMount(
+                media_generation.router,
+                "/api/admin/media-generation",
+                ["providers"],
+            ),
             _RouterMount(tls_router, "/api/admin/tls", ["tls"]),
             _RouterMount(security_router, "/api/admin/security", ["security"]),
             _RouterMount(admin_storage_router, "/api/admin/storage-backends", ["admin"]),
@@ -289,14 +314,14 @@ def build_app(server: OctopServer) -> FastAPI:
                     # Reject absolute paths and parent-dir references before
                     # joining, so user input never drives a path expression.
                     if raw_path.is_absolute() or ".." in raw_path.parts:
-                        return _dashboard_response(index_file, "")
+                        return _dashboard_fallback(index_file, full_path)
                     candidate = (dashboard_dir / Path(*raw_path.parts)).resolve()
                     try:
                         candidate.relative_to(dashboard_dir.resolve())
                     except ValueError:
-                        return _dashboard_response(index_file, "")
+                        return _dashboard_fallback(index_file, full_path)
                     if candidate.is_file():
                         return _dashboard_response(candidate, full_path)
-                return _dashboard_response(index_file, "")
+                return _dashboard_fallback(index_file, full_path)
 
     return app

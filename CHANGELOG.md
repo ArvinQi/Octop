@@ -6,6 +6,101 @@
 
 ## [Unreleased]
 
+## [0.9.31] - 2026-09-01
+
+### 新增
+
+- 聊天流式输出时默认展开思考/工具过程，回答完成后收起（历史记录仍收起）
+- 聊天侧栏与 @ 选择仅展示运行中的专家
+- 默认专家与控制台创建的专家一样使用家目录存储；聊天待办按计划顺序展示
+- 工作台浏览器可显式结束本地 Chrome 进程；空闲超时后也会回收（登录态仍保留在磁盘 profile）
+- 桌面端右上角窗口控制（最小化 / 最大化 / 关闭进托盘）
+
+### 修复
+
+- 过期 hashed 静态资源返回 404，避免升级后桌面壳加载旧脚本
+- 桌面无边框窗口改为 CSS/JS 拖拽，去掉会挡住右上角按钮的 `InvisibleTitleBarHeight`
+- macOS 点击程序坞只恢复主窗口，不再同时弹出托盘设置窗
+- 专家详情技能/子智能体卡片：图标在标题左侧，状态或 id 在标题右侧，描述单独一行
+- 桌面端等待本机服务就绪失败时改为中英文说明（跟随桌面语言设置），不再显示 `/api/health` 英文报错
+- 桌面启动页补齐右上角窗口按钮，并收紧启动/失败状态的展示
+- 桌面托盘设置窗去掉多余空白，右上角只保留关闭；macOS 单击菜单栏图标也会弹出设置
+
+## [0.9.30] - 2026-08-31
+
+### 新增
+
+- 腾讯云 Token Plan 企业版与 Hy 套餐
+- WeKnora、Dify 连接器，以及自定义 MCP 的 OAuth
+- 备份/恢复、聊天工具栏、SSO 预设与更友好的供应商错误提示
+- 技能展示本地化；知识库可配置文档数量上限；钉钉扫码注册
+- 对话接入 ask-user-question 人机确认流程
+
+### 修复
+
+- 专家根目录、连接器排序、飞牛图标及主题确认对话框等界面问题
+- 聊天中文语音识别跟随界面语言
+- MCP OAuth 刷新失败需重新授权；渠道异常 thinking 输出过滤
+- 数据库 v10 迁移遗漏 thread projection 表
+- 飞牛 FPK 无效在线升级与原生版启动加载；长会话相关问题
+- 通道弹框文案统一为「通道」，新建默认实时过程
+- `octop acp` 启动即崩溃（CLI 注册表属性应对齐 `acp_cmd`）
+
+## [0.9.29] - 2026-08-27
+
+### 修复
+
+- 长会话卡死：聊天历史改为独立投影分页加载，并支持后台迁移旧会话（不再同步扫 checkpoint）
+
+### 变更
+
+- 依赖：`orcakit-harness-agent[all]>=0.9.27`、`harness-memory>=0.9.7`、`harness-browser>=0.7.6`（自动 full VACUUM 关闭，空闲维护只走 lifecycle GC + incremental `nudge_vacuum`）
+
+## [0.9.28] - 2026-08-26
+
+### 修复
+
+- 无更新权限时隐藏检查更新入口
+- `/compact` 兼容 `.octop/conversation_history/` 卸载路径
+- FnOS 镜像改为 Docker Hub `jubaoliang/octop`
+
+### 新增
+
+- 基层医生学习助手增加普通医学问答快路径、国内专业学会/专科分会与国际指南精确路由，并完善受控信源降级和检索预算。
+
+## [0.9.27] - 2026-08-26
+
+### 新增
+
+- 内置插件随包装分发（默认关闭，卸载后升级不重建）
+- 可配置上传上限（`max_upload_mb` / `OCTOP_MAX_UPLOAD_MB`，默认 100MB）
+- Dashboard 推送通知（定时任务与主动关怀 toast）
+- 聊天音视频附件预览播放，并扩展 inbound 附件 MIME
+- 火山方舟 Seedream / Seedance 生成模型配置、测试与结果展示
+- 连接器：Ardot、滴答清单；远程 MCP OAuth 改为 catalog 驱动
+- 单工具开关热更新与插件工具目录
+- ACP 内置 Runner：Kimi Code、Cursor CLI、Pi
+- 知识库文件夹重命名
+- ONNX 模型下载竞速 Hugging Face 与 hf-mirror
+- 远程手机 ADB shell（旋转与分屏布局）
+- FnOS NAS 应用打包（Docker / native `.fpk`）
+- 专家模板扩充（通用、Karpathy、临床来源策略）
+- 中文子智能体约 49 个（HR / 法务 / 供应链）
+- Dashboard 剪贴板回退与聊天 UI 打磨
+
+### 修复
+
+- 知识库文件夹操作按钮误开文件夹
+- 工具预期失败不再误报为 `stream_error`
+- 连接器 OAuth 公网回调 / HTTPS / 自动保存；npm 不可写时回退用户级 prefix
+- SSO ID token issuer 校验
+- Dashboard：SW 激活后再 reload、Firefox 无限刷新、选择器 popover、文案全球化
+- 浏览器 runtime 目录在 Windows 上可写探测
+
+### 变更
+
+- FnOS 打包拆分为 `docker/` 与 `native/`
+
 ## [0.9.26] - 2026-08-23
 
 ### 新增

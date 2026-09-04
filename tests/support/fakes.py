@@ -65,6 +65,7 @@ class FakeHarnessAgent:
         self.config = SimpleNamespace(
             mcp_server_configs={},
             skills_disabled=frozenset(),
+            tools_disabled=frozenset(),
             skill_package_roots=None,
         )
         self._mcp_tools: list[Any] = []
@@ -201,6 +202,13 @@ description: General-purpose agent
         """Hot-update disabled skills (mirrors harness_agent.HarnessAgent)."""
         self.config.skills_disabled = frozenset(str(x) for x in (disabled or ()))
 
+    def set_tools_disabled(
+        self,
+        disabled: set[str] | frozenset[str] | list[str] | None,
+    ) -> None:
+        """Hot-update disabled tools (mirrors harness_agent.HarnessAgent)."""
+        self.config.tools_disabled = frozenset(str(x) for x in (disabled or ()))
+
     def set_skill_package_roots(self, roots: list[dict[str, str]] | None) -> None:
         """Hot-update skill package roots (mirrors harness_agent.HarnessAgent)."""
         self.config.skill_package_roots = roots
@@ -212,6 +220,7 @@ description: General-purpose agent
         tests, or the real disk-backed backend). Enumerate from whichever store holds
         them so the listed summaries match what the routers persisted.
         """
+        from octop.infra.skills.presentation import apply_skill_presentation
         from octop.infra.utils.frontmatter import parse_frontmatter
 
         collected: dict[str, str] = {}
@@ -266,15 +275,18 @@ description: General-purpose agent
                 slug = skill_dir.name
                 name = str(meta.get("name") or slug)
                 is_disabled = slug in disabled or name in disabled
-                merged[slug] = {
-                    "slug": slug,
-                    "name": name,
-                    "description": str(meta.get("description") or ""),
-                    "kind": "package",
-                    "package_id": package_id,
-                    "enabled": not is_disabled,
-                    "disabled": is_disabled,
-                }
+                merged[slug] = apply_skill_presentation(
+                    {
+                        "slug": slug,
+                        "name": name,
+                        "description": str(meta.get("description") or ""),
+                        "kind": "package",
+                        "package_id": package_id,
+                        "enabled": not is_disabled,
+                        "disabled": is_disabled,
+                    },
+                    meta,
+                )
         for path in sorted(collected):
             meta, _ = parse_frontmatter(collected[path])
             # Slug is the skill directory name (parent of SKILL.md), matching the
@@ -292,24 +304,18 @@ description: General-purpose agent
                 continue
             name = str(meta.get("name") or slug)
             is_disabled = slug in disabled or name in disabled
-            row: dict[str, Any] = {
-                "slug": slug,
-                "name": name,
-                "description": str(meta.get("description") or ""),
-                "path": path,
-                "kind": kind,
-                "enabled": not is_disabled,
-                "disabled": is_disabled,
-            }
-            # Mirror harness: emoji lives under metadata.{octop,lightclaw,orca,harness}.
-            metadata = meta.get("metadata") or {}
-            if isinstance(metadata, dict):
-                for key in ("octop", "lightclaw", "orca", "harness"):
-                    ext = metadata.get(key) or {}
-                    if isinstance(ext, dict) and "emoji" in ext:
-                        row["emoji"] = str(ext["emoji"])
-                        break
-            merged[slug] = row
+            merged[slug] = apply_skill_presentation(
+                {
+                    "slug": slug,
+                    "name": name,
+                    "description": str(meta.get("description") or ""),
+                    "path": path,
+                    "kind": kind,
+                    "enabled": not is_disabled,
+                    "disabled": is_disabled,
+                },
+                meta,
+            )
         return sorted(
             merged.values(),
             key=lambda row: (

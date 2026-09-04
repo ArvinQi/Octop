@@ -12,6 +12,27 @@ body {
   overscroll-behavior: none;
 }
 
+html {
+  --window-controls-inset-end: 0px;
+}
+
+/* Wails v3 frameless drag: the element under the cursor must set this. */
+html[data-octop-desktop-chrome] .octop-desktop-drag {
+  --wails-draggable: drag;
+  user-select: none;
+}
+
+html[data-octop-desktop-chrome] .octop-desktop-no-drag,
+html[data-octop-desktop-chrome] .octop-desktop-drag button,
+html[data-octop-desktop-chrome] .octop-desktop-drag a,
+html[data-octop-desktop-chrome] .octop-desktop-drag input,
+html[data-octop-desktop-chrome] .octop-desktop-drag textarea,
+html[data-octop-desktop-chrome] .octop-desktop-drag select,
+html[data-octop-desktop-chrome] .octop-desktop-drag [role="button"],
+html[data-octop-desktop-chrome] [data-octop-no-drag] {
+  --wails-draggable: no-drag;
+}
+
 #root {
   height: 100%;
   overflow: hidden;
@@ -311,16 +332,13 @@ html[data-theme="dark"] .octop-ant-switch-checked {
     padding: 0;
   }
 
-  /* Force tables to scroll horizontally on mobile */
+  /* Tables scroll inside their own wrapper on mobile — do not set
+     min-width on .octop-table (that expands the page and creates a
+     second, page-level horizontal scrollbar). */
   .ant-table-wrapper,
-  [class*="-table-wrapper"] {
-    overflow-x: auto !important;
-    -webkit-overflow-scrolling: touch;
-  }
-
-  .ant-table,
-  [class*="-table"] {
-    min-width: 600px;
+  .octop-table-wrapper {
+    max-width: 100%;
+    min-width: 0;
   }
 
   /* Modal responsive — max width on mobile */

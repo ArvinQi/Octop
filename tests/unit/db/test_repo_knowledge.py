@@ -50,11 +50,11 @@ def test_knowledge_tables_migrated(db: SqlitePool) -> None:
         "knowledge_bases",
         "knowledge_documents",
     }.issubset(names)
-    assert v == 9
+    assert v == 10
     assert "knowledge_base_members" not in names
-    assert "knowledge_base_id" in {
-        r["name"] for r in conn.execute("PRAGMA table_info(knowledge_bases)").fetchall()
-    }
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(knowledge_bases)").fetchall()}
+    assert "knowledge_base_id" in cols
+    assert "max_documents" in cols
 
 
 def test_path_layout_knowledge_dir(tmp_path: Path) -> None:
@@ -236,3 +236,113 @@ def test_migration_007_rebuilds_text_primary_keys(tmp_path: Path) -> None:
             for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         }
     assert "knowledge_base_members" not in tables
+
+
+def test_rename_folder_updates_descendant_paths(repo: KnowledgeRepo, owner_id: int) -> None:
+    kb = repo.create_base(owner_user_id=owner_id, name="Docs")
+    folder = repo.ensure_folder(kb.id, "notes/law")
+    doc = repo.create_document(
+        kb_id=kb.id,
+        filename="act.md",
+        path="notes/law/act.md",
+        content_type="text/markdown",
+        byte_size=4,
+    )
+    renamed = repo.rename_document(kb.id, folder.id, "legal")
+    assert renamed is not None
+    assert renamed.is_dir is True
+    assert renamed.filename == "legal"
+    assert renamed.path == "notes/legal"
+
+    children = repo.list_children(kb.id, "notes")
+    assert {row.path for row in children} == {"notes/legal"}
+    nested = repo.list_children(kb.id, "notes/legal")
+    assert [row.path for row in nested] == ["notes/legal/act.md"]
+    moved = repo.get_document(doc.id)
+    assert moved is not None
+    assert moved.path == "notes/legal/act.md"
+    assert moved.filename == "act.md"
+
+
+def test_rename_root_folder(repo: KnowledgeRepo, owner_id: int) -> None:
+    kb = repo.create_base(owner_user_id=owner_id, name="Docs")
+    folder = repo.ensure_folder(kb.id, "notes")
+    renamed = repo.rename_document(kb.id, folder.id, "chapters")
+    assert renamed is not None
+    assert renamed.path == "chapters"
+    assert renamed.filename == "chapters"
+
+
+def test_rename_file_updates_path_and_filename(repo: KnowledgeRepo, owner_id: int) -> None:
+    kb = repo.create_base(owner_user_id=owner_id, name="Docs")
+    doc = repo.create_document(
+        kb_id=kb.id,
+        filename="readme.md",
+        content_type="text/markdown",
+        byte_size=4,
+    )
+    renamed = repo.rename_document(kb.id, doc.id, "guide.md")
+    assert renamed is not None
+    assert renamed.filename == "guide.md"
+    assert renamed.path == "guide.md"
+
+
+def test_rename_document_missing_or_wrong_kb_returns_none(
+    repo: KnowledgeRepo, owner_id: int
+) -> None:
+    kb = repo.create_base(owner_user_id=owner_id, name="Docs")
+    other = repo.create_base(owner_user_id=owner_id, name="Other")
+    folder = repo.ensure_folder(kb.id, "notes")
+    assert repo.rename_document("missing-kb", folder.id, "x") is None
+    assert repo.rename_document(other.id, folder.id, "x") is None
+    assert repo.rename_document(kb.id, "missing-doc", "x") is None
+
+
+def test_update_base_persists_max_documents(repo: KnowledgeRepo, owner_id: int) -> None:
+    kb = repo.create_base(owner_user_id=owner_id, name="Docs")
+    assert kb.max_documents == 100
+    repo.update_base(kb.id, max_documents=42)
+    refreshed = repo.get_base(kb.id)
+    assert refreshed is not None
+    assert refreshed.max_documents == 42
+    repo.update_base(kb.id, description="unchanged")
+    assert repo.get_base(kb.id).max_documents == 42  # type: ignore[union-attr]
+
+
+def test_create_document_uses_kb_max_documents_for_limit(
+    repo: KnowledgeRepo, owner_id: int
+) -> None:
+    # The repo enforces whatever max_documents the caller passes (the service
+    # layer forwards kb.max_documents). A cap of 2 must reject the 3rd.
+    kb = repo.create_base(owner_user_id=owner_id, name="Tiny", max_documents=2)
+    assert kb.max_documents == 2
+    for i in range(2):
+        repo.create_document(
+            kb_id=kb.id,
+            filename=f"d{i}.md",
+            content_type="text/markdown",
+            byte_size=2,
+            max_documents=kb.max_documents,
+        )
+    with pytest.raises(ValueError, match="at most 2 documents"):
+        repo.create_document(
+            kb_id=kb.id,
+            filename="d2.md",
+            content_type="text/markdown",
+            byte_size=2,
+            max_documents=kb.max_documents,
+        )
+
+
+def test_create_document_zero_max_means_unlimited(repo: KnowledgeRepo, owner_id: int) -> None:
+    kb = repo.create_base(owner_user_id=owner_id, name="Unbounded", max_documents=0)
+    assert kb.max_documents == 0
+    for i in range(150):
+        repo.create_document(
+            kb_id=kb.id,
+            filename=f"d{i:03}.md",
+            content_type="text/markdown",
+            byte_size=2,
+            max_documents=kb.max_documents,
+        )
+    assert repo.get_base(kb.id).doc_count == 150  # type: ignore[union-attr]

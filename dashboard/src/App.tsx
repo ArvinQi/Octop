@@ -1,6 +1,10 @@
 import { createGlobalStyle } from "antd-style";
 import { ConfigProvider, theme as antdTheme } from "antd";
+import zhCN from "antd/locale/zh_CN";
+import enUS from "antd/locale/en_US";
 import { useEffect } from "react";
+import DesktopWindowControls from "./components/DesktopWindowControls";
+import { useDesktopChrome } from "./hooks/useDesktopChrome";
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import MainLayout from "./layouts/MainLayout";
@@ -17,6 +21,7 @@ import { LayoutModeProvider } from "./context/LayoutModeContext";
 import { VoiceOutputProvider } from "./context/VoiceOutputContext";
 import { useIsMobile } from "./hooks/useIsMobile";
 import { useUnauthorizedRedirect } from "./hooks/useUnauthorizedRedirect";
+import { installDesktopExternalLinks } from "./utils/desktopExternalLinks";
 import { brandTokensFor } from "./styles/themePalettes";
 import "./styles/theme-vars.css";
 import "./styles/layout.css";
@@ -31,11 +36,19 @@ const GlobalStyle = createGlobalStyle`
 
 function ThemedApp() {
   const { isDark, palette, customColor } = useTheme();
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const isMobile = useIsMobile();
+  const desktopChrome = useDesktopChrome();
   const brandTokens = brandTokensFor(palette, isDark, customColor);
+  // Make antd built-ins (Popconfirm OK/Cancel, Modal default footer, Empty,
+  // Pagination, DatePicker, Table… ) follow the current UI language.
+  const antdLocale = i18n.language?.toLowerCase().startsWith("zh")
+    ? zhCN
+    : enUS;
 
   useUnauthorizedRedirect();
+
+  useEffect(() => installDesktopExternalLinks(), []);
 
   // Set document title based on current language
   useEffect(() => {
@@ -98,8 +111,11 @@ function ThemedApp() {
   };
 
   return (
-    <ConfigProvider theme={themeConfig} prefixCls="octop">
+    <ConfigProvider theme={themeConfig} prefixCls="octop" locale={antdLocale}>
       <AntdAppProvider>
+        {desktopChrome ? (
+          <DesktopWindowControls chrome={desktopChrome} />
+        ) : null}
         <Routes>
           <Route path="/login" element={<LoginPage />} />
           <Route path="/login/oidc/complete" element={<OidcComplete />} />

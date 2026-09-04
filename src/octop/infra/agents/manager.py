@@ -7,7 +7,8 @@ import json
 import logging
 import re
 import shutil
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -18,6 +19,10 @@ from harness_agent.security.models import SecurityPolicy
 from octop.i18n.domains.agents import NO_MODELS_CONFIGURED, format_agent_start_error
 from octop.infra.agents.acp_settings import ACPSettingsStore
 from octop.infra.agents.langfuse import LangfuseSettings, LangfuseSettingsStore
+from octop.infra.agents.media_generation import (
+    MediaGenerationSettings,
+    MediaGenerationSettingsStore,
+)
 from octop.infra.agents.memory_backend import memory_backend_from_agent_config
 from octop.infra.agents.profile import (
     dump_skill_package_ids,
@@ -53,8 +58,10 @@ from octop.infra.connectors.builder import (
 from octop.infra.connectors.service import ConnectorService
 from octop.infra.db.repos.audit import ACTOR_SYSTEM
 from octop.infra.errors import ErrorCode, OctopError
+from octop.infra.skills.presentation import apply_skill_presentation, localize_skill_summary
 from octop.infra.skills.skill_package_store import SkillPackageStore
 from octop.infra.skills.workspace_catalog import list_workspace_skill_summaries
+from octop.infra.utils.locale import Locale
 from octop.infra.utils.ulid import new_short_id
 
 if TYPE_CHECKING:
@@ -90,6 +97,13 @@ def skills_disabled_set(cfg: dict[str, Any]) -> set[str]:
     if isinstance(raw, list):
         return {str(x) for x in raw}
     return set()
+
+
+def tools_disabled_set(cfg: dict[str, Any]) -> set[str]:
+    """Return disabled built-in tool names from agent config (critical stripped)."""
+    from octop.infra.agents.tool_catalog import tools_disabled_set as _tools_disabled_set
+
+    return _tools_disabled_set(cfg)
 
 
 def skill_package_ids_list(cfg: dict[str, Any]) -> list[str]:
@@ -322,12 +336,19 @@ class AgentManager:
         self._team_processor: Any | None = None
         self._harness_manager: HarnessAgentManager | None = None
         self._lock = asyncio.Lock()
+        self._active_invocations: dict[str, int] = {}
+        self._invocation_waiters: dict[str, int] = {}
+        self._history_backfills: dict[str, asyncio.Event] = {}
         self._reload_dirty: set[str] = set()
         self._reload_worker_running: dict[str, bool] = {}
         self._bootstrap_graph_refresh_pending: set[str] = set()
         # Chat user id used to resolve connectors when agent.user_id is NULL (shared agents).
         self._connector_user_override: dict[str, int] = {}
         self._langfuse = LangfuseSettingsStore(
+            settings_repo=repos.settings_repo,
+            secret_repo=repos.secret_repo,
+        )
+        self._media_generation = MediaGenerationSettingsStore(
             settings_repo=repos.settings_repo,
             secret_repo=repos.secret_repo,
         )
@@ -358,6 +379,10 @@ class AgentManager:
         self._repos = repos
         self._config = config
         self._langfuse = LangfuseSettingsStore(
+            settings_repo=repos.settings_repo,
+            secret_repo=repos.secret_repo,
+        )
+        self._media_generation = MediaGenerationSettingsStore(
             settings_repo=repos.settings_repo,
             secret_repo=repos.secret_repo,
         )
@@ -433,6 +458,10 @@ class AgentManager:
         return self._langfuse
 
     @property
+    def media_generation(self) -> MediaGenerationSettingsStore:
+        return self._media_generation
+
+    @property
     def paths(self) -> PathLayout:
         return self._paths
 
@@ -440,11 +469,21 @@ class AgentManager:
     def harness_manager(self) -> HarnessAgentManager | None:
         return self._harness_manager
 
+    @property
+    def octop_config(self) -> OctopConfig:
+        return self._config
+
     # ------------------------------------------------------------------
     # CRUD — persist agent rows and sync harness runtime
     # ------------------------------------------------------------------
 
-    async def create(self, spec: AgentCreateSpec, *, defer_bootstrap: bool = False) -> AgentRow:
+    async def create(
+        self,
+        spec: AgentCreateSpec,
+        *,
+        defer_bootstrap: bool = False,
+        workspace_initializer: Callable[[AgentRow, Any], Awaitable[None]] | None = None,
+    ) -> AgentRow:
         """Create a new agent, persist to DB, and register with harness."""
         async with self._lock:
             self._assert_agent_name_available(spec.user_id, spec.name)
@@ -518,8 +557,15 @@ class AgentManager:
                 assert row is not None
             if spec.template_name:
                 await self._seed_expert_template(row, spec.template_name)
+            if workspace_initializer is not None:
+                workspace = self._backend_workspace_for_row(row)
+                await workspace_initializer(row, workspace)
+                row = self._repos.agent_repo.get(agent_id)
+                assert row is not None
             if defer_bootstrap:
                 self._repos.agent_repo.set_state(agent_id, "starting")
+                row = self._repos.agent_repo.get(agent_id)
+                assert row is not None
                 asyncio.create_task(
                     self._complete_create_bootstrap(row),
                     name=f"bootstrap-agent-{agent_id}",
@@ -845,25 +891,76 @@ class AgentManager:
     # Chat / invoke — stream, call, HITL, thread model overrides
     # ------------------------------------------------------------------
 
+    def is_agent_active(self, agent_id: str) -> bool:
+        """Whether the agent is currently executing a user-visible invocation."""
+        return self._active_invocations.get(agent_id, 0) > 0
+
+    def try_begin_history_backfill(self, agent_id: str) -> bool:
+        """Reserve an idle agent for one history backfill without racing a new turn."""
+        if (
+            self.is_agent_active(agent_id)
+            or self._invocation_waiters.get(agent_id, 0) > 0
+            or agent_id in self._history_backfills
+        ):
+            return False
+        self._history_backfills[agent_id] = asyncio.Event()
+        return True
+
+    def end_history_backfill(self, agent_id: str) -> None:
+        """Release one history-backfill reservation and wake waiting invocations."""
+        event = self._history_backfills.pop(agent_id, None)
+        if event is not None:
+            event.set()
+
+    async def _begin_invocation(self, agent_id: str) -> None:
+        self._invocation_waiters[agent_id] = self._invocation_waiters.get(agent_id, 0) + 1
+        try:
+            while event := self._history_backfills.get(agent_id):
+                await event.wait()
+        finally:
+            waiting = self._invocation_waiters.get(agent_id, 1) - 1
+            if waiting > 0:
+                self._invocation_waiters[agent_id] = waiting
+            else:
+                self._invocation_waiters.pop(agent_id, None)
+        self._active_invocations[agent_id] = self._active_invocations.get(agent_id, 0) + 1
+
+    def _end_invocation(self, agent_id: str) -> None:
+        active = self._active_invocations.get(agent_id, 1) - 1
+        if active > 0:
+            self._active_invocations[agent_id] = active
+        else:
+            self._active_invocations.pop(agent_id, None)
+
+    @asynccontextmanager
+    async def _track_invocation(self, agent_id: str) -> AsyncIterator[None]:
+        await self._begin_invocation(agent_id)
+        try:
+            yield
+        finally:
+            self._end_invocation(agent_id)
+
     async def stream(self, agent_id: str, request: dict[str, Any]) -> AsyncIterator[Any]:
         """Stream harness chunks (Langfuse tracing handled inside harness-agent)."""
         if self._harness_manager is None:
             raise self._unavailable_error(agent_id)
 
-        self._apply_pending_bootstrap_graph_refresh(agent_id)
-        req = self._prepare_stream_request(agent_id, request)
-        async for chunk in self._harness_manager.stream(agent_id, cast(Any, req)):
-            yield chunk
-        self._apply_pending_bootstrap_graph_refresh(agent_id)
+        async with self._track_invocation(agent_id):
+            self._apply_pending_bootstrap_graph_refresh(agent_id)
+            req = self._prepare_stream_request(agent_id, request)
+            async for chunk in self._harness_manager.stream(agent_id, cast(Any, req)):
+                yield chunk
+            self._apply_pending_bootstrap_graph_refresh(agent_id)
 
     async def call(self, agent_id: str, request: dict[str, Any]) -> dict[str, Any]:
         """Non-streaming harness invocation (one-shot agent call)."""
         if self._harness_manager is None:
             raise self._unavailable_error(agent_id)
-        self._apply_pending_bootstrap_graph_refresh(agent_id)
-        req = self._prepare_stream_request(agent_id, request)
-        result = await self._harness_manager.call(agent_id, cast(Any, req))
-        self._apply_pending_bootstrap_graph_refresh(agent_id)
+        async with self._track_invocation(agent_id):
+            self._apply_pending_bootstrap_graph_refresh(agent_id)
+            req = self._prepare_stream_request(agent_id, request)
+            result = await self._harness_manager.call(agent_id, cast(Any, req))
+            self._apply_pending_bootstrap_graph_refresh(agent_id)
         if not isinstance(result, dict):
             return {"result": result}
         return result
@@ -877,10 +974,11 @@ class AgentManager:
         """Resume a paused HITL interrupt for *thread_id*."""
         if self._harness_manager is None:
             raise self._unavailable_error(agent_id)
-        self._apply_pending_bootstrap_graph_refresh(agent_id)
-        async for chunk in self._harness_manager.resume_hitl(agent_id, thread_id, decisions):
-            yield chunk
-        self._apply_pending_bootstrap_graph_refresh(agent_id)
+        async with self._track_invocation(agent_id):
+            self._apply_pending_bootstrap_graph_refresh(agent_id)
+            async for chunk in self._harness_manager.resume_hitl(agent_id, thread_id, decisions):
+                yield chunk
+            self._apply_pending_bootstrap_graph_refresh(agent_id)
 
     def cancel_stream(self, agent_id: str, thread_id: str) -> None:
         """Signal harness-agent to stop the active stream for *(agent_id, thread_id)*."""
@@ -1359,6 +1457,28 @@ class AgentManager:
             self._harness_manager.set_langfuse(self._langfuse.harness_config())
         return view
 
+    async def save_media_generation(
+        self,
+        *,
+        enabled: bool,
+        image_enabled: bool,
+        video_enabled: bool,
+        image_model: str,
+        video_model: str,
+        api_key: str | None = None,
+    ) -> MediaGenerationSettings:
+        """Persist media settings and rebuild running harness agents."""
+        view = self._media_generation.save(
+            enabled=enabled,
+            image_enabled=image_enabled,
+            video_enabled=video_enabled,
+            image_model=image_model,
+            video_model=video_model,
+            api_key=api_key,
+        )
+        await self.reload_all()
+        return view
+
     def save_security(self, policy: SecurityPolicy | dict[str, Any]) -> SecurityPolicy:
         """Persist security policy and push it into harness agents."""
         resolved = self._security.save(policy)
@@ -1429,6 +1549,27 @@ class AgentManager:
         cfg["skills_disabled"] = sorted(disabled)
         self.persist_harness_config(agent_id, cfg)
         self.sync_skills_disabled(agent_id, disabled)
+
+    async def persist_tools_disabled(self, agent_id: str, disabled: set[str]) -> None:
+        """Persist builtin ``tools_disabled`` and hot-sync the effective denylist."""
+        from octop.infra.agents.tool_catalog import normalize_tools_disabled
+
+        cfg = self.get_config(agent_id)
+        cleaned = normalize_tools_disabled(sorted(disabled))
+        cfg["tools_disabled"] = cleaned
+        self.persist_harness_config(agent_id, cfg)
+        self.sync_effective_tools_disabled(agent_id)
+
+    async def persist_plugin_tools_config(
+        self,
+        agent_id: str,
+        plugins: dict[str, Any],
+    ) -> None:
+        """Persist ``config.plugins`` and hot-sync tool denylist (no harness reload)."""
+        cfg = self.get_config(agent_id)
+        cfg["plugins"] = plugins
+        self.persist_harness_config(agent_id, cfg)
+        self.sync_effective_tools_disabled(agent_id)
 
     def _resolve_skill_package_dirs(self, agent_id: str) -> list[str]:
         """Resolve persisted package ids to existing absolute package skill directories."""
@@ -1609,7 +1750,12 @@ class AgentManager:
         """Return the configured context cap for *agent_id* (``max_input_length``)."""
         return config_context_max_tokens(self.get_config(agent_id), fallback=fallback)
 
-    async def list_skill_summaries(self, agent_id: str) -> list[dict[str, Any]]:
+    async def list_skill_summaries(
+        self,
+        agent_id: str,
+        *,
+        locale: Locale | None = None,
+    ) -> list[dict[str, Any]]:
         """Installed skills for *agent_id* (harness catalog + package ``kind`` labels).
 
         Harness lists builtin / workspace / ``skills_dir`` entries (all non-builtin as
@@ -1636,8 +1782,28 @@ class AgentManager:
                     skills_disabled=skills_disabled_set(cfg),
                 )
             )
+        from harness_agent.skills import catalog as harness_skill_catalog  # noqa: PLC0415
+
+        if getattr(harness_skill_catalog, "SKILL_PRESENTATION_METADATA_VERSION", 0) < 1:
+            workspace = getattr(agent, "workspace", None)
+            aread = getattr(workspace, "aread_text", None)
+            if callable(aread):
+                for index, row in enumerate(harness_rows):
+                    if row.get("label") or row.get("display_name"):
+                        continue
+                    slug = str(row.get("slug") or "").strip()
+                    if not slug:
+                        continue
+                    root = "_builtin_skills" if row.get("kind") == "builtin" else "skills"
+                    manifest = await aread(f"{root}/{slug}/SKILL.md")
+                    if manifest is None:
+                        continue
+                    meta, _body = parse_frontmatter(manifest)
+                    harness_rows[index] = apply_skill_presentation(row, meta)
         package_ids = skill_package_ids_list(cfg)
         if not package_ids:
+            if locale is not None:
+                return [localize_skill_summary(row, locale) for row in harness_rows]
             return harness_rows
 
         disabled = skills_disabled_set(cfg)
@@ -1684,13 +1850,16 @@ class AgentManager:
             merged[slug] = package_row
 
         kind_order = {"builtin": 0, "package": 1, "workspace": 2}
-        return sorted(
+        rows = sorted(
             merged.values(),
             key=lambda row: (
                 kind_order.get(str(row.get("kind")), 99),
                 str(row.get("slug", "")),
             ),
         )
+        if locale is not None:
+            return [localize_skill_summary(row, locale) for row in rows]
+        return rows
 
     async def list_subagent_summaries(self, agent_id: str) -> list[dict[str, Any]]:
         """Installed subagents for *agent_id* (delegates to harness-agent catalog)."""
@@ -1702,6 +1871,40 @@ class AgentManager:
     def sync_skills_disabled(self, agent_id: str, disabled: set[str]) -> None:
         """Push ``skills_disabled`` to the running harness agent (hot update)."""
         self.get_agent(agent_id).set_skills_disabled(disabled)
+
+    def sync_tools_disabled(self, agent_id: str, disabled: set[str]) -> None:
+        """Push ``tools_disabled`` to the running harness agent (hot update).
+
+        No-op when the agent is not loaded — persisted config still applies on
+        the next start via ``_build_harness_config``.
+        """
+        try:
+            agent = self.get_agent(agent_id)
+        except OctopError:
+            return
+        setter = getattr(agent, "set_tools_disabled", None)
+        if callable(setter):
+            setter(disabled)
+
+    def sync_effective_tools_disabled(self, agent_id: str) -> None:
+        """Hot-sync builtin + plugin denylist derived from current agent config."""
+        from harness_agent.plugins import PluginRegistry
+
+        from octop.infra.agents.tool_catalog import effective_tools_disabled
+
+        cfg = self.get_config(agent_id)
+        global_plugins = (
+            self._plugin_manager.global_enabled_map() if self._plugin_manager is not None else {}
+        )
+        registered = [(reg.plugin_id, reg.name) for reg in PluginRegistry().all_tools()]
+        self.sync_tools_disabled(
+            agent_id,
+            effective_tools_disabled(
+                cfg,
+                registered_plugin_tools=registered,
+                global_plugins=global_plugins,
+            ),
+        )
 
     # ------------------------------------------------------------------
     # Internal — validation
@@ -2115,6 +2318,7 @@ class AgentManager:
         from harness_agent.middleware.bootstrap import bootstrap_marker_exists  # noqa: PLC0415
 
         from octop.infra.agents.workspace_dir import (  # noqa: PLC0415
+            harness_workspace_path,
             resolve_workspace_host_path,
             system_files_path_from_config,
         )
@@ -2123,7 +2327,7 @@ class AgentManager:
         raw = cfg.get("workspace_dir")
         if isinstance(raw, str) and raw.strip():
             # Persisted value goes to harness as-is; host map is Octop-local only.
-            harness_workspace = Path(raw.strip())
+            harness_workspace = harness_workspace_path(raw, cfg)
             workspace_dir = resolve_workspace_host_path(raw, cfg)
             workspace_dir.mkdir(parents=True, exist_ok=True)
         else:
@@ -2166,12 +2370,23 @@ class AgentManager:
 
         from harness_agent.plugins import PluginRegistry, build_plugin_tools  # noqa: PLC0415
 
-        agent_plugins = cfg.get("plugins") if isinstance(cfg.get("plugins"), dict) else {}
+        from octop.infra.agents.plugin_tool_defaults import (  # noqa: PLC0415
+            expand_plugin_tools_default_on,
+        )
+
         global_plugins = (
             self._plugin_manager.global_enabled_map() if self._plugin_manager is not None else {}
         )
+        registered = [(reg.plugin_id, reg.name) for reg in PluginRegistry().all_tools()]
+        # Mount every globally-enabled plugin tool; per-agent ``enabled: false``
+        # is enforced via ``tools_disabled`` so toggles can hot-sync without reload.
+        mount_plugins = expand_plugin_tools_default_on(
+            None,
+            registered_tools=registered,
+            global_plugins=global_plugins,
+        )
         plugin_tools = build_plugin_tools(
-            agent_plugins=agent_plugins,
+            agent_plugins=mount_plugins,
             global_plugins=global_plugins,
         )
         # Plugin authors may register tools with non-ASCII (e.g. Chinese) names,
@@ -2327,9 +2542,20 @@ class AgentManager:
             skills_dir=skill_dirs or None,
             default_timezone=self._config.default_timezone,
             log_dir=str(self.paths.logs_dir),
+            media_generation=self._media_generation.harness_config(),
             **_memory_extract_settings(cfg, is_ref_usable=self._providers.is_model_ref_usable),
             **_resolve_memory_backend_kwargs(cfg, workspace_dir=workspace_dir, config=self._config),
         )
+        if "tools_disabled" in _HARNESS_AGENT_CONFIG_FIELDS:
+            from octop.infra.agents.tool_catalog import effective_tools_disabled
+
+            harness_cfg.tools_disabled = frozenset(
+                effective_tools_disabled(
+                    cfg,
+                    registered_plugin_tools=registered,
+                    global_plugins=global_plugins,
+                )
+            )
         applied = policy.apply_to_config(harness_cfg)
         return replace(
             applied,

@@ -81,6 +81,38 @@ def _is_allowed_domain(domain: str, policy: dict[str, list[str]]) -> bool:
     return _is_primary_domain(domain, policy) or _is_secondary_domain(domain, policy)
 
 
+def _is_attributed_relay_url(url: str, text: str, policy: dict[str, list[str]]) -> bool:
+    """Allow an arbitrary C-tier page only when its secondary status is fully disclosed."""
+    source_line = next(
+        (
+            line.strip()
+            for line in text.splitlines()
+            if line.strip().startswith(("来源：", "来源:")) and url in line
+        ),
+        "",
+    )
+    if "转述页面（C级，仅作背景）" not in source_line:
+        return False
+
+    required_markers = policy.get("attributed_relay_required_markers", [])
+    if any(marker not in text for marker in required_markers):
+        return False
+
+    identity_line = next(
+        (
+            line.strip()
+            for line in text.splitlines()
+            if line.strip().startswith(("原始出处：", "原始出处:"))
+        ),
+        "",
+    )
+    if identity_line.count("｜") < 3:
+        return False
+    if not re.search(r"(?:19|20)\d{2}|年份未提供|版本未提供", identity_line):
+        return False
+    return "DOI" in identity_line or "文号" in identity_line
+
+
 def _extract_markdown_links(text: str) -> list[tuple[str, str]]:
     return re.findall(r"\[([^\]]+)\]\((https?://[^)\s]+)\)", text)
 
@@ -187,6 +219,33 @@ _DEFAULT_CLINICAL_SAFETY_MODULES = (
 _DEFAULT_SOURCE_RESTRICTED_MODULES = tuple(
     name for name in _DEFAULT_CLINICAL_SAFETY_MODULES if name != "high_risk_refusal"
 )
+
+# 医学安全域终稿不得夹带英文/中文过程句。来源标题里的英文专名不在此列。
+_PROCESS_LANGUAGE_PATTERNS: tuple[tuple[str, str], ...] = (
+    (r"\bI'll\b", "I'll"),
+    (r"\bI will\b", "I will"),
+    (r"\bLet me\b", "Let me"),
+    (r"\bLet's\b", "Let's"),
+    (r"\bNow running\b", "Now running"),
+    (r"Validation passed", "Validation passed"),
+    (r"Here is the answer", "Here is the answer"),
+    (r"搜索过程", "搜索过程"),
+    (r"检索日志", "检索日志"),
+)
+
+
+def _body_without_source_lines(text: str) -> str:
+    """Drop 来源 lines so English titles in citations are not process-language hits."""
+    return "\n".join(
+        line for line in text.splitlines() if not line.strip().startswith(("来源：", "来源:"))
+    )
+
+
+def _validate_process_language(text: str, errors: list[str]) -> None:
+    body = _body_without_source_lines(text)
+    for pattern, label in _PROCESS_LANGUAGE_PATTERNS:
+        if re.search(pattern, body, flags=re.IGNORECASE):
+            errors.append(f"医学输出不得包含过程语句：{label}")
 
 
 def _policy_modules(policy: dict[str, list[str]], key: str, fallback: tuple[str, ...]) -> set[str]:
@@ -342,6 +401,7 @@ def validate(text: str, module: str, policy_path: Path, allow_no_source: bool) -
         for pattern in policy.get("blocked_output_patterns", []):
             if re.search(pattern, text, flags=re.IGNORECASE):
                 errors.append(f"命中禁止输出模式：{pattern}")
+        _validate_process_language(text, errors)
 
     markdown_links = _extract_markdown_links(text)
     bare_urls = _extract_bare_urls(text)
@@ -365,13 +425,24 @@ def validate(text: str, module: str, policy_path: Path, allow_no_source: bool) -
             errors.append(f"不允许裸URL：{url}")
 
         # 权威来源白名单只约束医学和政策声明；通用任务可引用任何合法链接。
+        attributed_relay_urls: list[str] = []
         for url in urls:
             domain = _domain(url)
             if not domain:
                 errors.append(f"无效URL：{url}")
                 continue
             if not _is_allowed_domain(domain, policy):
-                errors.append(f"来源域名不在白名单：{domain}")
+                if _is_attributed_relay_url(url, text, policy):
+                    attributed_relay_urls.append(url)
+                else:
+                    errors.append(f"来源域名不在白名单：{domain}")
+
+        if attributed_relay_urls:
+            if "正文承载" in text:
+                errors.append("C级转述页面不得标记为正文承载")
+            if "原文定位：" in text or "原文定位:" in text:
+                errors.append("C级转述页面不得声称提供原文定位")
+            warnings.append("包含C级全网转述页面：只能作为背景，不是最终证据")
 
         secondary_urls = [url for url in urls if _is_secondary_domain(_domain(url), policy)]
         if secondary_urls:

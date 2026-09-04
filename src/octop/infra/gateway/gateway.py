@@ -20,6 +20,7 @@ from octop.infra.db.repos.channels import ChannelRow
 from octop.infra.db.repos.sessions import SessionRow
 from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.gateway.cli import CLI_CHANNEL_ID, CliChannel, CliHub
+from octop.infra.gateway.history_backfill import HistoryBackfillQueue
 from octop.infra.gateway.process import build_harness_request, media_backend_for_agent
 from octop.infra.gateway.process.processor import GlobalProcessor
 from octop.infra.gateway.process.response_mode import (
@@ -28,7 +29,12 @@ from octop.infra.gateway.process.response_mode import (
 )
 from octop.infra.gateway.slash.dispatcher import SlashDispatcher, build_default_dispatcher
 from octop.infra.gateway.threads import ThreadRegistry
-from octop.infra.gateway.ws import WS_CHANNEL_ID, WebSocketChannel, WebSocketHub
+from octop.infra.gateway.ws import (
+    WS_CHANNEL_ID,
+    WebSocketChannel,
+    WebSocketHub,
+)
+from octop.infra.utils.llm_text import strip_thinking
 from octop.infra.utils.locale import DEFAULT_LOCALE, Locale
 
 if TYPE_CHECKING:
@@ -112,6 +118,7 @@ class Gateway:
         self._ws_channel: WebSocketChannel | None = None
         self._cli_channel: CliChannel | None = None
         self._runtime_status: dict[str, ChannelRuntimeStatus] = {}
+        self._history_backfill = HistoryBackfillQueue()
 
     def replace_repos(self, repos: RepoBundle) -> None:
         """Point channel/thread persistence at a rebound control-plane pool."""
@@ -120,6 +127,8 @@ class Gateway:
             session_repo=repos.session_repo,
             thread_repo=repos.thread_repo,
         )
+        if self._processor is not None:
+            self._processor.replace_thread_message_repo(repos.thread_message_repo)
 
     @property
     def ws_hub(self) -> WebSocketHub:
@@ -150,6 +159,10 @@ class Gateway:
         if self._processor is None:
             raise RuntimeError("gateway not booted")
         return self._processor
+
+    @property
+    def history_backfill(self) -> HistoryBackfillQueue:
+        return self._history_backfill
 
     @property
     def slash_meta(self) -> SlashRuntimeMeta | None:
@@ -195,6 +208,7 @@ class Gateway:
             provider_repo=self._repos.provider_repo,
             dispatcher=self._dispatcher,
             usage_repo=self._repos.usage_repo,
+            thread_message_repo=self._repos.thread_message_repo,
             gateway=self,
         )
 
@@ -266,6 +280,7 @@ class Gateway:
         logger.info("Gateway channels reloaded from DB (%d enabled)", len(rows))
 
     async def shutdown(self) -> None:
+        await self._history_backfill.close()
         if self._channel_manager:
             await self._channel_manager.stop()
         self._channel_manager = None
@@ -374,8 +389,9 @@ class Gateway:
             ThreadRegistry.CHANNEL_DASHBOARD,
             ThreadRegistry.CHANNEL_CLI,
         )
+        is_text = normalize_cron_task_type(str(task_type)) == "text"
 
-        if normalize_cron_task_type(str(task_type)) == "text":
+        if is_text:
             outbound = text
         else:
             # Stamp composer chips on this run's HumanMessage only (no history backfill).
@@ -437,7 +453,7 @@ class Gateway:
             async for chunk in self._agent_manager.stream(agent_id, request):
                 if chunk.get("type") in ("token", "delta"):
                     parts.append(str(chunk.get("content") or chunk.get("text") or ""))
-            outbound = "".join(parts).strip() or "(empty)"
+            outbound = strip_thinking("".join(parts)) or "(empty)"
 
         if virtual_stream:
             self._bump_dashboard_session(session, session_key, text)
@@ -452,6 +468,8 @@ class Gateway:
                 self._resolve_push_subject(session),
                 outbound,
             )
+            if session.channel_type == ThreadRegistry.CHANNEL_DASHBOARD and is_text:
+                await self._notify_dashboard_text_push(session, agent_id, outbound)
             return
 
         if not session.channel_id:
@@ -468,6 +486,26 @@ class Gateway:
     def _resolve_push_subject(self, session: SessionRow) -> ChannelSubject:
         """Build ChannelSubject from session; IM routing enrichment is in harness-gateway."""
         return session.to_channel_subject()
+
+    async def _notify_dashboard_text_push(
+        self, session: SessionRow, agent_id: str, text: str
+    ) -> None:
+        """Fan out a toast payload to the owner's dashboard notification sockets."""
+        if not text.strip():
+            return
+        row = self._agent_manager.get_row(agent_id)
+        name = getattr(row, "name", None) if row is not None else None
+        agent_name = str(name).strip() if isinstance(name, str) and name.strip() else agent_id
+        await self._ws_hub.push_to_user(
+            session.user_id,
+            {
+                "type": "dashboard_push",
+                "agent_id": agent_id,
+                "thread_id": session.thread_id,
+                "text": text,
+                "agent_name": agent_name,
+            },
+        )
 
     def _require_channel_manager(self) -> ChannelManager:
         if self._channel_manager is None:

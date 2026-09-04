@@ -6,6 +6,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import {
+  App,
   Tree,
   Empty,
   Spin,
@@ -21,7 +22,6 @@ import {
   Popconfirm,
   Input,
 } from "antd";
-import { message } from "@/utils/antdMessage";
 
 import type { TreeDataNode, TreeProps } from "antd";
 import {
@@ -50,6 +50,7 @@ import { useHorizontalResize } from "../../../../hooks/useHorizontalResize";
 import { useServerTimezone } from "../../../../hooks/useServerTimezone";
 import { formatServerIsoDateTime } from "../../../../utils/formatMessageTime";
 import { isAgentChatReady } from "../../../../utils/agentError";
+import { apiErrorMessage } from "../../../../utils/apiError";
 import AgentNotReadyScreen from "../../../Chat/components/AgentNotReadyScreen";
 import { fileTreeIcon } from "../../../../utils/fileTreeIcon";
 import { workspaceEntryPath } from "../../../../utils/workspacePath";
@@ -258,6 +259,7 @@ export default function WorkspaceDrawer({
   onClose,
 }: WorkspaceDrawerProps) {
   const { t } = useTranslation();
+  const { modal, message } = App.useApp();
   const isMobile = useIsMobile();
   const timeZone = useServerTimezone();
   const { agents } = useAgent();
@@ -706,7 +708,7 @@ export default function WorkspaceDrawer({
                   label: t("common.delete"),
                   danger: true,
                   onClick: () => {
-                    Modal.confirm({
+                    modal.confirm({
                       title: target.is_dir
                         ? t("workspace.deleteDirConfirm")
                         : t("workspace.deleteConfirm"),
@@ -1011,8 +1013,7 @@ export default function WorkspaceDrawer({
       }
     } catch (err: unknown) {
       message.error(
-        (err instanceof Error ? err.message : String(err)) ||
-          t("workspace.uploadFailed", "上传失败"),
+        apiErrorMessage(err, t("workspace.uploadFailed", "上传失败"), t),
       );
     }
     return false;

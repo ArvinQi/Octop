@@ -6,7 +6,7 @@ import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from octop.api.common.agent import assert_agent_access
@@ -17,12 +17,14 @@ from octop.i18n.domains.stream import format_stream_error
 from octop.infra.agents.experts.catalog import (
     default_welcome_payload,
     read_workspace_manifest_welcome,
-    welcome_payload_from_expert,
-    welcome_payload_has_content,
 )
 from octop.infra.agents.profile import welcome_from_row
 from octop.infra.errors import ErrorCode, OctopError
-from octop.infra.gateway.hitl.coordinator import HitlChannelCoordinator, HitlStreamContext
+from octop.infra.gateway.hitl.coordinator import (
+    HitlChannelCoordinator,
+    HitlStreamContext,
+    decision_rejection_reason,
+)
 from octop.infra.gateway.hitl.store import HitlPendingRecord
 from octop.infra.utils.llm_text import ainvoke_text
 from octop.infra.utils.locale import resolve_request_locale
@@ -56,8 +58,7 @@ async def get_chat_welcome(
     Resolution order:
     1. Agent row ``welcome_message`` (instance-owned; set at create/edit).
     2. Agent workspace ``.octop/manifest.json`` (seeded at create; quick cards + fallback copy).
-    3. Bundled expert catalog entry for ``template_name`` (legacy agents).
-    4. Default quick cards (``general-assistant`` or a small built-in set).
+    3. Default quick cards (``general-assistant`` or a small built-in set).
     """
     assert_agent_access(server, agent_id, user)
     assert server.app_runtime is not None
@@ -70,14 +71,6 @@ async def get_chat_welcome(
         payload = await read_workspace_manifest_welcome(workspace)
 
     row = registry.get_row(agent_id)
-    template = (row.template_name if row else None) or ""
-    if payload is None and catalog is not None and template:
-        expert = catalog.get(template)
-        if expert is not None:
-            candidate = welcome_payload_from_expert(expert)
-            if welcome_payload_has_content(candidate):
-                payload = candidate
-
     if payload is None:
         payload = default_welcome_payload(catalog)
 
@@ -89,7 +82,7 @@ async def get_chat_welcome(
 
 async def iter_dashboard_hitl_resume_sse(
     *,
-    agent_registry: Any,
+    processor: Any,
     hitl_coordinator: HitlChannelCoordinator,
     agent_id: str,
     thread_id: str,
@@ -114,21 +107,29 @@ async def iter_dashboard_hitl_resume_sse(
         session_key=session_key,
         channel_type=channel_type,
     )
+    disconnected = False
     try:
-        async for chunk in agent_registry.resume_hitl(agent_id, thread_id, decisions):
-            if await is_disconnected():
-                break
+        async for chunk in processor.iter_hitl_resume_chunks(
+            agent_id=agent_id,
+            thread_id=thread_id,
+            user_id=user_id,
+            decisions=decisions,
+        ):
+            if not disconnected:
+                disconnected = await is_disconnected()
             if isinstance(chunk, dict) and chunk.get("type") == "hitl_required":
                 request_payload = chunk.get("request")
                 if isinstance(request_payload, dict):
                     hitl_coordinator.register_from_request(request_payload, ctx=hitl_ctx)
-            yield format_sse("chunk", chunk)
+            if not disconnected:
+                yield format_sse("chunk", chunk)
         if pending is not None:
             hitl_coordinator.store.mark_resolved(
                 pending.pending_id,
                 "rejected" if rejected else "approved",
             )
-        yield format_sse("chunk", {"type": "done"})
+        if not disconnected:
+            yield format_sse("chunk", {"type": "done"})
     except Exception as exc:
         yield format_sse(
             "chunk",
@@ -162,8 +163,8 @@ async def resume_hitl(
 ) -> StreamingResponse:
     """Resume a paused human-in-the-loop tool approval and stream subsequent chunks."""
     assert_agent_access(server, agent_id, user)
-    agent_registry = server.app_runtime.agent_registry
-    hitl_coordinator = server.app_runtime.gateway.processor.hitl_coordinator
+    processor = server.app_runtime.gateway.processor
+    hitl_coordinator = processor.hitl_coordinator
     pending = hitl_coordinator.store.resolve_pending_for_thread(
         body.thread_id,
         agent_id=agent_id,
@@ -176,10 +177,14 @@ async def resume_hitl(
         user_id=user.id,
         pending=pending,
     )
+    if pending is not None:
+        reason = decision_rejection_reason(pending, body.decisions)
+        if reason is not None:
+            raise HTTPException(status_code=400, detail=reason)
 
     async def gen() -> AsyncIterator[str]:
         async for frame in iter_dashboard_hitl_resume_sse(
-            agent_registry=agent_registry,
+            processor=processor,
             hitl_coordinator=hitl_coordinator,
             agent_id=agent_id,
             thread_id=body.thread_id,

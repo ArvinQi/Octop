@@ -75,6 +75,17 @@ def test_serialize_history_message_includes_thinking_and_tools() -> None:
     assert tool_result["content"][0]["type"] == "tool_result"
     assert tool_result["content"][0]["output"] == "found"
 
+    failed_tool_result = _serialize_history_message(
+        ToolMessage(
+            content="provider unavailable",
+            tool_call_id="call_2",
+            name="generate_image",
+            status="error",
+        )
+    )
+    assert failed_tool_result is not None
+    assert failed_tool_result["content"][0]["error_code"] == "tool_error"
+
 
 def test_split_string_thinking_parses_redacted_block() -> None:
     from octop.api.routers.chat.serialize import _split_string_thinking
@@ -94,6 +105,16 @@ def test_serialize_history_message_splits_redacted_thinking() -> None:
 def test_strip_thinking_removes_redacted_block() -> None:
     raw = "<think>internal</think>\nPolished prompt"
     assert _strip_thinking(raw) == "Polished prompt"
+
+
+def test_strip_thinking_removes_orphan_closing_prefix() -> None:
+    raw = "internal reasoning without an opening tag</think>\nVisible answer"
+    assert _strip_thinking(raw) == "Visible answer"
+
+
+def test_strip_thinking_removes_unclosed_thinking_suffix() -> None:
+    raw = "Visible answer\n<thinking>truncated internal reasoning"
+    assert _strip_thinking(raw) == "Visible answer"
 
 
 def test_llm_text_content_strips_thinking_from_string_message() -> None:

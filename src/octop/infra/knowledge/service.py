@@ -8,6 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, cast
 
+from octop.config import DEFAULT_MAX_UPLOAD_MB, upload_mb_to_bytes
 from octop.infra.db.repos.knowledge import KnowledgeBaseRow, KnowledgeDocumentRow
 from octop.infra.knowledge.files import (
     delete_document_file,
@@ -18,11 +19,13 @@ from octop.infra.knowledge.files import (
 from octop.infra.knowledge.gate import assert_knowledge_usable
 from octop.infra.knowledge.index import KnowledgeIndex
 from octop.infra.knowledge.parse import parse_document
-from octop.infra.knowledge.relpath import normalize_kb_path, path_basename
+from octop.infra.knowledge.relpath import normalize_kb_path, path_basename, path_parent
 
 MAX_DOCS_PER_KB = 100
 MAX_BASES_PER_OWNER = 20
-MAX_DOCUMENT_BYTES = 20 * 1024 * 1024  # 20 MiB
+MAX_DOCUMENT_BYTES = upload_mb_to_bytes(DEFAULT_MAX_UPLOAD_MB)
+# Upper bound for the per-base max_documents field. Mirrors Field(le=10000).
+MAX_KB_MAX_DOCUMENTS = 10_000
 _MAX_PREVIEW_CHARS = 200_000
 _EXT_TO_CONTENT_TYPE = {
     ".txt": "text/plain",
@@ -52,6 +55,13 @@ class KnowledgeService:
     def __init__(self, services: Any) -> None:
         self._services = services
 
+    def _max_document_bytes(self) -> int:
+        config = getattr(self._services, "config", None)
+        limit = getattr(config, "max_upload_bytes", None)
+        if isinstance(limit, int) and limit > 0:
+            return limit
+        return MAX_DOCUMENT_BYTES
+
     @property
     def _repo(self) -> Any:
         return self._services.knowledge_repo
@@ -65,10 +75,13 @@ class KnowledgeService:
         default_open: bool = False,
         shared: bool = False,
         icon_name: str = "",
+        max_documents: int = MAX_DOCS_PER_KB,
     ) -> KnowledgeBaseRow:
         assert_knowledge_usable(
             self._services.settings_repo.get, getattr(self._services, "provider_repo", None)
         )
+        if max_documents < 0 or max_documents > MAX_KB_MAX_DOCUMENTS:
+            raise ValueError(f"max_documents must be between 0 and {MAX_KB_MAX_DOCUMENTS}")
         owned = self._repo.count_bases_for_owner(owner_user_id)
         if owned >= MAX_BASES_PER_OWNER:
             raise ValueError(f"a user can own at most {MAX_BASES_PER_OWNER} knowledge bases")
@@ -83,6 +96,7 @@ class KnowledgeService:
                 shared=shared,
                 icon_name=icon_name,
                 embedding_model=model,
+                max_documents=max_documents,
             ),
         )
 
@@ -103,9 +117,14 @@ class KnowledgeService:
         default_open: bool | None = None,
         shared: bool | None = None,
         icon_name: str | None = None,
+        max_documents: int | None = None,
         is_admin: bool = False,
     ) -> KnowledgeBaseRow:
         self.require_owner(kb_id, actor_user_id=actor_user_id, is_admin=is_admin)
+        if max_documents is not None and (
+            max_documents < 0 or max_documents > MAX_KB_MAX_DOCUMENTS
+        ):
+            raise ValueError(f"max_documents must be between 0 and {MAX_KB_MAX_DOCUMENTS}")
         self._repo.update_base(
             kb_id,
             name=name,
@@ -113,6 +132,7 @@ class KnowledgeService:
             default_open=default_open,
             shared=shared,
             icon_name=icon_name,
+            max_documents=max_documents,
         )
         return self._require_base(kb_id)
 
@@ -232,10 +252,9 @@ class KnowledgeService:
         if document.content_type not in _TEXT_CONTENT_TYPES:
             raise ValueError("unsupported knowledge document content type: not editable text")
         encoded = content.encode("utf-8")
-        if len(encoded) > MAX_DOCUMENT_BYTES:
-            raise ValueError(
-                f"knowledge document size exceeds maximum of {MAX_DOCUMENT_BYTES} bytes"
-            )
+        limit = self._max_document_bytes()
+        if len(encoded) > limit:
+            raise ValueError(f"knowledge document size exceeds maximum of {limit} bytes")
         write_document(kb_id, document.id, document.filename, encoded)
         self._repo.update_document(
             doc_id,
@@ -287,11 +306,10 @@ class KnowledgeService:
         assert_knowledge_usable(
             self._services.settings_repo.get, getattr(self._services, "provider_repo", None)
         )
-        self.get_writable_base(kb_id, actor_user_id=actor_user_id, is_admin=is_admin)
-        if len(content) > MAX_DOCUMENT_BYTES:
-            raise ValueError(
-                f"knowledge document size exceeds maximum of {MAX_DOCUMENT_BYTES} bytes"
-            )
+        base = self.get_writable_base(kb_id, actor_user_id=actor_user_id, is_admin=is_admin)
+        limit = self._max_document_bytes()
+        if len(content) > limit:
+            raise ValueError(f"knowledge document size exceeds maximum of {limit} bytes")
         rel = normalize_kb_path(path or filename)
         name = path_basename(rel)
         if not name:
@@ -299,13 +317,14 @@ class KnowledgeService:
         resolved_type = _resolve_content_type(name, content_type)
         if resolved_type not in _ALLOWED_CONTENT_TYPES:
             raise ValueError(f"unsupported knowledge document content type: {content_type}")
+        # The per-base limit lives on the KB row (schema v10). 0 = unlimited.
         document = self._repo.create_document(
             kb_id=kb_id,
             filename=name,
             path=rel,
             content_type=resolved_type,
             byte_size=len(content),
-            max_documents=MAX_DOCS_PER_KB,
+            max_documents=base.max_documents,
         )
         try:
             write_document(kb_id, document.id, name, content)
@@ -345,6 +364,33 @@ class KnowledgeService:
         if refreshed is None:
             raise LookupError("knowledge document not found")
         return cast(KnowledgeDocumentRow, refreshed)
+
+    def rename_document(
+        self,
+        kb_id: str,
+        doc_id: str,
+        *,
+        new_name: str,
+        actor_user_id: int,
+        is_admin: bool = False,
+    ) -> KnowledgeDocumentRow:
+        """Rename a document (file or folder), rewriting descendant paths for folders."""
+        self.get_writable_base(kb_id, actor_user_id=actor_user_id, is_admin=is_admin)
+        document = self._repo.get_document(doc_id)
+        if document is None or document.kb_id != kb_id:
+            raise LookupError("knowledge document not found")
+        cleaned = (new_name or "").strip()
+        if not cleaned or "/" in cleaned or "\\" in cleaned:
+            raise ValueError("invalid knowledge document name")
+        new_path = normalize_kb_path(f"{path_parent(document.path)}/{cleaned}")
+        if new_path == document.path:
+            return cast(KnowledgeDocumentRow, document)
+        if self._repo.get_document_by_path(kb_id, new_path) is not None:
+            raise ValueError("a knowledge document with this name already exists")
+        result = self._repo.rename_document(kb_id, doc_id, cleaned)
+        if result is None:
+            raise LookupError("knowledge document not found")
+        return cast(KnowledgeDocumentRow, result)
 
     def delete_base(self, kb_id: str, *, actor_user_id: int, is_admin: bool = False) -> None:
         self.require_owner(kb_id, actor_user_id=actor_user_id, is_admin=is_admin)

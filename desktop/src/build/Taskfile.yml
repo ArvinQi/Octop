@@ -1,0 +1,55 @@
+version: "3"
+
+# Shell UI is Go-embedded HTML (desktop/src/assets). No Vite/npm frontend.
+
+tasks:
+  go:mod:tidy:
+    summary: Runs go mod tidy
+    internal: true
+    run: once
+    cmds:
+      - go mod tidy
+
+  install:frontend:deps:
+    summary: Builds the embedded-assets development server
+    cmds:
+      - go build -o .task/devserver.exe ./cmd/devserver
+
+  build:frontend:
+    summary: No Vite build (assets embedded)
+    cmds:
+      - echo "embedded assets; skip vite"
+
+  generate:bindings:
+    summary: Bindings unused (Call.ByName)
+    cmds:
+      - echo "skip generate bindings"
+
+  generate:icons:
+    summary: Generates .ico from appicon.png and .icns from appicon-macos.png
+    dir: build
+    sources:
+      - appicon.png
+      - appicon-macos.png
+    generates:
+      - darwin/icons.icns
+      - windows/icon.ico
+    cmds:
+      # Windows / Linux keep the full-bleed artwork.
+      - wails3 generate icons -input appicon.png -windowsfilename windows/icon.ico -macfilename ""
+      # macOS expects 824x824 artwork on a 1024x1024 canvas; a full-bleed tile
+      # renders ~24% larger than every other app in the Dock and Launchpad.
+      - wails3 generate icons -input appicon-macos.png -macfilename darwin/icons.icns -windowsfilename ""
+
+  dev:frontend:
+    summary: Serves the embedded shell assets for Wails dev mode
+    deps:
+      - task: install:frontend:deps
+    cmds:
+      - ./.task/devserver.exe
+
+  update:build-assets:
+    summary: Updates generated build assets from config.yml
+    dir: build
+    cmds:
+      - wails3 update build-assets -name "{{.APP_NAME}}" -binaryname "{{.APP_NAME}}" -config config.yml -dir .

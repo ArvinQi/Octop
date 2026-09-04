@@ -1,10 +1,9 @@
 import { memo, useMemo, useState, useCallback, useRef, useEffect } from "react";
-import { Image, Button } from "antd";
+import { Image, Button, Tooltip } from "antd";
 import { message as antMessage } from "@/utils/antdMessage";
 
 import Markdown from "../../../components/Markdown/LazyMarkdown";
 import {
-  ChevronRight,
   Copy,
   Check,
   RotateCcw,
@@ -12,6 +11,7 @@ import {
   Volume2,
   Settings,
   GitFork,
+  PanelRight,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router-dom";
@@ -19,25 +19,17 @@ import type { ChatAttachment, ChatMessage } from "../hooks/useChat";
 import type { ComposerTagLookups } from "./UserMessageComposerTags";
 import UserMessageComposerTags from "./UserMessageComposerTags";
 import { deriveMessageContent } from "../utils/messageContent";
+import { inferKindFromNameAndMime } from "../utils/chatAttachments";
+import { ChatMediaPlayer } from "./ChatMediaPlayer";
 import { useAuthImageSrc } from "../../../hooks/useAuthImageSrc";
 import {
   agentAttachmentAccessUrl,
-  collectToolMediaFromToolData,
   isDataUrl,
-  parseStructuredToolOutput,
   workspacePathFromAccessUrl,
 } from "../../../utils/toolMediaBlocks";
-import { formatToolArguments } from "../../../utils/formatToolArguments";
 import { formatMessageTime } from "../../../utils/formatMessageTime";
+import { copyText } from "../../../utils/copyText";
 import { useServerTimezone } from "../../../hooks/useServerTimezone";
-import {
-  useToolDisplayNames,
-  resolveToolLabel,
-} from "../hooks/toolDisplayNames";
-import {
-  buildAcpPermissionRespondMessage,
-  parseAcpPermissionPrompt,
-} from "../../../utils/parseAcpPermission";
 import { useVoiceOutputContext } from "../../../context/VoiceOutputContext";
 import { prepareSpeechText } from "../../../utils/plainTextForSpeech";
 import {
@@ -46,8 +38,26 @@ import {
   isChatStreamError,
 } from "../../../utils/chatStreamError";
 import { MessageFileCard } from "./MessageFileCard";
-import { parseKnowledgeCitations } from "../../../utils/parseKnowledgeCitations";
+import AskQuestionCard from "./AskQuestionCard";
+import { extractAskQuestions, isAskHitl } from "../../../api/types/hitl";
 import styles from "../index.module.less";
+import {
+  DefaultToolRenderer,
+  builtinPluginHost,
+  createPluginUiHost,
+  parseOctopToolOutput,
+  resolveToolRenderer,
+  useToolRendererVersion,
+  type ToolRenderProps,
+  type ToolRenderStatus,
+} from "../../../plugins/toolRenderers";
+import { BuiltinOctopUiFallback } from "../../../plugins/toolRenderers/builtin/BuiltinOctopUiFallback";
+import { ToolUiErrorBoundary } from "../../../plugins/toolRenderers/ToolUiErrorBoundary";
+import { lookupPluginIdForTool } from "../../../plugins/toolRenderers/toolPluginIndex";
+import { useChatToolDock } from "../ChatToolDockContext";
+import { useToolUiDockButtonStyle } from "../hooks/useToolUiDockButtonStyle";
+import type { ParsedToolOutput } from "../../../plugins/toolRenderers/types";
+import type { ToolRendererRegistration } from "../../../plugins/toolRenderers/types";
 
 interface MessageBubbleProps {
   message: ChatMessage;
@@ -286,42 +296,14 @@ function CopyButton({ text }: { text: string }) {
 
   const handleCopy = useCallback(async () => {
     if (!text) return;
-    try {
-      if (navigator.clipboard && window.isSecureContext) {
-        try {
-          await navigator.clipboard.writeText(text);
-        } catch {
-          // Clipboard API can fail in PWA standalone mode when the document
-          // loses focus briefly on button press — fall through to execCommand.
-          const ta = document.createElement("textarea");
-          ta.value = text;
-          ta.style.position = "fixed";
-          ta.style.left = "-999999px";
-          ta.style.top = "-999999px";
-          document.body.appendChild(ta);
-          ta.focus();
-          ta.select();
-          document.execCommand("copy");
-          ta.remove();
-        }
-      } else {
-        const ta = document.createElement("textarea");
-        ta.value = text;
-        ta.style.position = "fixed";
-        ta.style.left = "-999999px";
-        ta.style.top = "-999999px";
-        document.body.appendChild(ta);
-        ta.focus();
-        ta.select();
-        document.execCommand("copy");
-        ta.remove();
-      }
-      setCopied(true);
-      antMessage.success(t("common.copied"));
-      setTimeout(() => setCopied(false), 2000);
-    } catch {
+    const ok = await copyText(text);
+    if (!ok) {
       antMessage.error(t("common.copyFailed"));
+      return;
     }
+    setCopied(true);
+    antMessage.success(t("common.copied"));
+    setTimeout(() => setCopied(false), 2000);
   }, [text, t]);
 
   return (
@@ -337,184 +319,194 @@ function CopyButton({ text }: { text: string }) {
   );
 }
 
+function canDockToolUi(
+  registration: ToolRendererRegistration | null,
+  parsed: ParsedToolOutput,
+): boolean {
+  if (parsed.octopUi) return true;
+  return (
+    registration != null &&
+    registration.id !== "default" &&
+    registration.pluginId !== "builtin"
+  );
+}
+
+function toolUiDockLabel(
+  toolData: NonNullable<ChatMessage["toolData"]>,
+): string {
+  return toolData.displayName?.trim() || toolData.name?.trim() || "Tool";
+}
+
 export function ToolDetailsInline({
   toolData,
   isStreaming,
   onAcpPermissionSelect,
   hideMediaPreview = false,
   agentId = null,
+  forceInline = false,
 }: {
   toolData: NonNullable<ChatMessage["toolData"]>;
   isStreaming: boolean;
   onAcpPermissionSelect?: (message: string) => void;
   hideMediaPreview?: boolean;
   agentId?: string | null;
+  /** When true, skip dock attach / placeholder (full renderer in side panel). */
+  forceInline?: boolean;
 }) {
   const { t } = useTranslation();
-  const [expanded, setExpanded] = useState(false);
-  const displayName = useToolDisplayNames();
+  const toolDock = useChatToolDock();
+  // Plugin UIs load async after mount — bump forces resolve() to re-run.
+  const rendererVersion = useToolRendererVersion();
+  const parsed = useMemo(
+    () => parseOctopToolOutput(toolData.output),
+    [toolData.output],
+  );
+  const pluginId =
+    toolData.pluginId ?? lookupPluginIdForTool(toolData.name) ?? "builtin";
 
-  const structuredOutput = useMemo(() => {
-    const parsed = parseStructuredToolOutput(toolData.output, agentId);
-    const media = collectToolMediaFromToolData(toolData, agentId);
-    return {
-      images: media.images,
-      videos: media.videos,
-      files: parsed.files,
-      textOutput: parsed.textOutput,
-    };
-  }, [toolData, agentId]);
-
-  const formattedArgs = useMemo(
-    () => formatToolArguments(toolData.arguments || ""),
-    [toolData.arguments],
+  const registration = useMemo(
+    () =>
+      resolveToolRenderer({
+        toolName: toolData.name,
+        pluginId: pluginId === "builtin" ? null : pluginId,
+        parsed,
+      }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- rendererVersion invalidates registry lookups
+    [toolData.name, pluginId, parsed, rendererVersion],
   );
 
-  let formattedOutput = structuredOutput.textOutput;
-  if (!formattedOutput && toolData.output) {
-    formattedOutput = parseKnowledgeCitations(toolData.output).text;
+  const status: ToolRenderStatus = toolData.errorCode
+    ? "error"
+    : toolData.output !== undefined
+    ? "done"
+    : "running";
+
+  let args: unknown = toolData.arguments;
+  if (typeof toolData.arguments === "string") {
     try {
-      formattedOutput = JSON.stringify(JSON.parse(formattedOutput), null, 2);
+      args = JSON.parse(toolData.arguments);
     } catch {
-      // keep as-is
+      args = toolData.arguments;
     }
-  } else if (formattedOutput) {
-    formattedOutput = parseKnowledgeCitations(formattedOutput).text;
   }
 
-  const hasMediaPreview =
-    structuredOutput.images.length > 0 || structuredOutput.videos.length > 0;
-  const hasResult = toolData.output !== undefined;
-  const completed = hasResult || (!isStreaming && hasMediaPreview);
-  const mediaOnly =
-    completed &&
-    hasMediaPreview &&
-    !structuredOutput.textOutput &&
-    structuredOutput.files.length === 0;
-  const acpPermission = useMemo(
-    () =>
-      toolData.name === "acp_runner"
-        ? parseAcpPermissionPrompt(toolData.output, toolData.arguments)
-        : null,
-    [toolData.arguments, toolData.name, toolData.output],
-  );
-  const statusLabel = completed
-    ? t("common.done", "Done")
-    : isStreaming
-    ? t("common.running", "Running")
-    : t("common.pending", "Pending");
+  const props: ToolRenderProps = {
+    pluginId: registration?.pluginId ?? pluginId,
+    toolName: toolData.name ?? "",
+    displayName: toolData.displayName,
+    callId: toolData.callId,
+    status,
+    args,
+    data:
+      parsed.data !== undefined
+        ? parsed.data
+        : parsed.isJson
+        ? parsed.raw
+        : toolData.output,
+    textFallback: parsed.text,
+    host:
+      registration && registration.pluginId !== "builtin"
+        ? createPluginUiHost(registration.pluginId)
+        : builtinPluginHost,
+    output: toolData.output,
+    isStreaming,
+    hideMediaPreview,
+    onAcpPermissionSelect,
+    agentId,
+  };
 
-  return (
-    <div className={styles.inlineToolBlock}>
+  const dockable = canDockToolUi(registration ?? null, parsed);
+  const callId = toolData.callId;
+  const isDocked =
+    !forceInline &&
+    dockable &&
+    !!callId &&
+    (toolDock?.isToolUiDocked(callId) ?? false);
+
+  const showDockButton =
+    !forceInline && !isDocked && dockable && !!callId && !!toolDock;
+  const { wrapRef, buttonStyle } = useToolUiDockButtonStyle(showDockButton, [
+    toolData.output,
+    registration?.id,
+    rendererVersion,
+  ]);
+
+  const openInDock = useCallback(() => {
+    if (!callId || !toolDock) return;
+    toolDock.openToolUiPanel({
+      callId,
+      title: toolUiDockLabel(toolData),
+      toolName: toolData.name,
+    });
+  }, [callId, toolData, toolDock]);
+
+  const dockActions = showDockButton ? (
+    <div className={styles.toolUiDockActions} style={buttonStyle}>
+      <Tooltip title={t("chat.openToolUiInDock", "Open in side panel")}>
+        <button
+          type="button"
+          className={styles.toolUiDockBtn}
+          onClick={openInDock}
+          aria-label={t("chat.openToolUiInDock", "Open in side panel")}
+        >
+          <PanelRight size={14} strokeWidth={2} aria-hidden />
+        </button>
+      </Tooltip>
+    </div>
+  ) : null;
+
+  if (isDocked) {
+    return (
       <button
         type="button"
-        className={styles.inlineToolSummary}
-        onClick={() => setExpanded((v) => !v)}
-        aria-expanded={expanded}
+        className={styles.toolUiDockPlaceholder}
+        onClick={() => toolDock?.focusToolUiPanel(callId!)}
+        title={t("chat.toolUiDockedOpen", "Open side panel")}
       >
-        <span className={styles.inlineToolLabel}>
-          {t("chatUsage.tool", "Tool")}
+        <PanelRight size={16} strokeWidth={2} aria-hidden />
+        <span className={styles.toolUiDockPlaceholderTitle}>
+          {toolUiDockLabel(toolData)}
         </span>
-        <code className={styles.inlineToolName}>
-          {resolveToolLabel(toolData.name, toolData.displayName, displayName)}
-        </code>
-        <span className={styles.inlineToolStatus}>{statusLabel}</span>
-        <ChevronRight
-          size={14}
-          className={`${styles.inlineToolChevron} ${
-            expanded ? styles.inlineToolChevronOpen : ""
-          }`}
-        />
+        <span className={styles.toolUiDockPlaceholderHint}>
+          {t("chat.toolUiDockedHint", "Moved to side panel")}
+        </span>
       </button>
+    );
+  }
 
-      {/* Media previews stay outside the collapsible details (unless shown on turn strip). */}
-      {!hideMediaPreview && structuredOutput.images.length > 0 && (
-        <div className={styles.inlineToolMediaPreview}>
-          <ImageGallery images={structuredOutput.images} />
-        </div>
-      )}
-      {!hideMediaPreview && structuredOutput.videos.length > 0 && (
-        <div className={styles.inlineToolMediaPreview}>
-          {structuredOutput.videos.map((video, idx) => (
-            <video
-              key={`${video.url}-${idx}`}
-              className={styles.toolMediaVideo}
-              src={video.url}
-              controls
-              preload="metadata"
-              playsInline
-            />
-          ))}
-        </div>
-      )}
-      {!hideMediaPreview && structuredOutput.files.length > 0 && (
-        <div className={styles.inlineToolMediaPreview}>
-          <div className={styles.messageFiles}>
-            {structuredOutput.files.map((file, idx) => (
-              <MessageFileCard
-                key={`${file.url}-${idx}`}
-                url={file.url}
-                filename={file.filename}
-                agentId={agentId}
-              />
-            ))}
-          </div>
-        </div>
-      )}
+  if (registration && registration.id !== "default") {
+    const Comp = registration.component;
+    return (
+      <div
+        ref={wrapRef}
+        data-octop-tool-renderer=""
+        className={styles.toolUiRendererWrap}
+      >
+        <ToolUiErrorBoundary propsForFallback={props}>
+          <Comp {...props} />
+        </ToolUiErrorBoundary>
+        {dockActions}
+      </div>
+    );
+  }
 
-      {expanded && (
-        <div className={styles.inlineToolDetails}>
-          {toolData.arguments !== undefined && (
-            <div className={styles.inlineToolSection}>
-              <div className={styles.inlineToolSectionLabel}>
-                {t("chatUsage.arguments", "Arguments")}
-              </div>
-              <pre className={styles.inlineToolCode}>{formattedArgs}</pre>
-            </div>
-          )}
-          {(hasResult || (!isStreaming && hasMediaPreview)) && !mediaOnly && (
-            <div className={styles.inlineToolSection}>
-              <div className={styles.inlineToolSectionLabel}>
-                {t("chatUsage.result", "Result")}
-              </div>
-              {formattedOutput ? (
-                <pre className={styles.inlineToolCode}>{formattedOutput}</pre>
-              ) : (
-                <pre className={styles.inlineToolCode}>
-                  [{t("chatUsage.mediaOutput", "Media output")}]
-                </pre>
-              )}
-            </div>
-          )}
-          {acpPermission && onAcpPermissionSelect && !isStreaming && (
-            <div className={styles.inlineToolSection}>
-              <div className={styles.inlineToolSectionLabel}>
-                {t("acp.chatPermissionTitle", "外部 Agent 需要权限确认")}
-              </div>
-              <p className={styles.inlineToolHint}>{acpPermission.title}</p>
-              <div className={styles.acpPermissionActions}>
-                {acpPermission.options.map((opt) => (
-                  <Button
-                    key={opt.id}
-                    size="small"
-                    type="default"
-                    onClick={() =>
-                      onAcpPermissionSelect(
-                        buildAcpPermissionRespondMessage(
-                          acpPermission.runner,
-                          opt.id,
-                        ),
-                      )
-                    }
-                  >
-                    {opt.title}
-                  </Button>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
+  // Structured plugin envelope without a loaded custom renderer — still show a card.
+  if (parsed.octopUi) {
+    return (
+      <div
+        ref={wrapRef}
+        data-octop-tool-renderer=""
+        className={styles.toolUiRendererWrap}
+      >
+        <BuiltinOctopUiFallback {...props} />
+        {dockActions}
+      </div>
+    );
+  }
+
+  return (
+    <div data-octop-tool-renderer="">
+      <DefaultToolRenderer {...props} />
     </div>
   );
 }
@@ -592,6 +584,32 @@ function MessageBubble({
   if (message.hitlData) {
     const actions = message.hitlData.action_requests ?? [];
     const hitlStatus = message.hitlData.status ?? "pending";
+    if (isAskHitl(actions)) {
+      // Pending questions are rendered in ChatPage's composer dock so they
+      // stay immediately above the input even when message history scrolls.
+      if (hitlStatus === "pending") return null;
+      const questions = extractAskQuestions(actions);
+      return (
+        <div
+          className={`${styles.bubble} ${styles.assistantBubble} ${
+            compact ? styles.compact : ""
+          }`}
+        >
+          <AskQuestionCard
+            questions={questions}
+            status={hitlStatus}
+            onSubmit={
+              onHitlDecision
+                ? (answer) =>
+                    onHitlDecision(
+                      actions.map(() => ({ type: "respond", message: answer })),
+                    )
+                : undefined
+            }
+          />
+        </div>
+      );
+    }
     return (
       <div
         className={`${styles.bubble} ${styles.assistantBubble} ${
@@ -666,10 +684,36 @@ function MessageBubble({
   const errorAction = isError ? chatStreamErrorAction(textContent) : null;
   const attachments = message.attachments || [];
   const imageAttachments = attachments.filter(
-    (attachment) => attachment.kind === "image",
+    (attachment) =>
+      inferKindFromNameAndMime(
+        attachment.mediaType,
+        attachment.filename,
+        attachment.kind,
+      ) === "image",
+  );
+  const videoAttachments = attachments.filter(
+    (attachment) =>
+      inferKindFromNameAndMime(
+        attachment.mediaType,
+        attachment.filename,
+        attachment.kind,
+      ) === "video",
+  );
+  const audioAttachments = attachments.filter(
+    (attachment) =>
+      inferKindFromNameAndMime(
+        attachment.mediaType,
+        attachment.filename,
+        attachment.kind,
+      ) === "audio",
   );
   const fileAttachments = attachments.filter(
-    (attachment) => attachment.kind === "file",
+    (attachment) =>
+      inferKindFromNameAndMime(
+        attachment.mediaType,
+        attachment.filename,
+        attachment.kind,
+      ) === "file",
   );
   const hasAttachments = attachments.length > 0;
 
@@ -751,6 +795,36 @@ function MessageBubble({
                 <div className={styles.userText}>
                   {imageAttachments.length > 0 && (
                     <ImageGallery images={imageAttachments} agentId={agentId} />
+                  )}
+                  {videoAttachments.length > 0 && (
+                    <div className={styles.messageMediaList}>
+                      {videoAttachments.map((attachment, idx) => (
+                        <ChatMediaPlayer
+                          key={`${attachment.url}-${idx}`}
+                          url={attachment.url}
+                          filename={attachment.filename}
+                          workspacePath={attachment.workspacePath}
+                          mediaType={attachment.mediaType}
+                          kind="video"
+                          agentId={agentId}
+                        />
+                      ))}
+                    </div>
+                  )}
+                  {audioAttachments.length > 0 && (
+                    <div className={styles.messageMediaList}>
+                      {audioAttachments.map((attachment, idx) => (
+                        <ChatMediaPlayer
+                          key={`${attachment.url}-${idx}`}
+                          url={attachment.url}
+                          filename={attachment.filename}
+                          workspacePath={attachment.workspacePath}
+                          mediaType={attachment.mediaType}
+                          kind="audio"
+                          agentId={agentId}
+                        />
+                      ))}
+                    </div>
                   )}
                   {fileAttachments.length > 0 && (
                     <FileAttachmentList
@@ -835,6 +909,36 @@ function MessageBubble({
               <div className={`${styles.assistantText} ${groupCls}`}>
                 {imageAttachments.length > 0 && (
                   <ImageGallery images={imageAttachments} agentId={agentId} />
+                )}
+                {videoAttachments.length > 0 && (
+                  <div className={styles.messageMediaList}>
+                    {videoAttachments.map((attachment, idx) => (
+                      <ChatMediaPlayer
+                        key={`${attachment.url}-${idx}`}
+                        url={attachment.url}
+                        filename={attachment.filename}
+                        workspacePath={attachment.workspacePath}
+                        mediaType={attachment.mediaType}
+                        kind="video"
+                        agentId={agentId}
+                      />
+                    ))}
+                  </div>
+                )}
+                {audioAttachments.length > 0 && (
+                  <div className={styles.messageMediaList}>
+                    {audioAttachments.map((attachment, idx) => (
+                      <ChatMediaPlayer
+                        key={`${attachment.url}-${idx}`}
+                        url={attachment.url}
+                        filename={attachment.filename}
+                        workspacePath={attachment.workspacePath}
+                        mediaType={attachment.mediaType}
+                        kind="audio"
+                        agentId={agentId}
+                      />
+                    ))}
+                  </div>
                 )}
                 {fileAttachments.length > 0 && (
                   <FileAttachmentList

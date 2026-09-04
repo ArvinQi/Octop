@@ -514,6 +514,13 @@
   font-size: 13px;
   font-weight: 600;
   line-height: 1;
+  overflow: hidden;
+}
+
+.skillPickerAvatarImg {
+  width: 18px;
+  height: 18px;
+  object-fit: contain;
 }
 
 .skillPickerText {
@@ -627,6 +634,30 @@
   :global([class*="panelCompact"]) {
     width: 100%;
     max-width: none;
+  }
+}
+
+.compactPickerPanel {
+  min-width: 280px;
+}
+
+.compactPickerBack {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 40px;
+  padding: 8px 10px;
+  border: none;
+  border-bottom: 1px solid var(--fn-border-secondary, rgba(0, 0, 0, 0.06));
+  background: transparent;
+  color: var(--fn-text-secondary);
+  font-size: 13px;
+  cursor: pointer;
+
+  &:hover {
+    background: var(--fn-bg-hover, rgba(0, 0, 0, 0.03));
+    color: var(--fn-text-primary);
   }
 }
 

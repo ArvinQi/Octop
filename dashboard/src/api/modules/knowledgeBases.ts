@@ -37,6 +37,7 @@ export interface KnowledgeBase {
   embedding_model: string;
   embedding_dim: number;
   doc_count: number;
+  max_documents: number;
   created_at: number;
   updated_at: number;
 }
@@ -86,7 +87,7 @@ export interface KnowledgeOnnxDownloadState {
 export const DEFAULT_KNOWLEDGE_LIMITS: KnowledgeLimits = {
   max_bases_per_owner: 20,
   max_docs_per_kb: 100,
-  max_document_bytes: 20 * 1024 * 1024,
+  max_document_bytes: 100 * 1024 * 1024,
 };
 
 export const knowledgeBasesApi = {
@@ -151,6 +152,7 @@ export const knowledgeBasesApi = {
     default_open?: boolean;
     shared?: boolean;
     icon_name?: string;
+    max_documents?: number;
   }) =>
     request<KnowledgeBase>("/knowledge-bases", {
       method: "POST",
@@ -165,6 +167,7 @@ export const knowledgeBasesApi = {
       default_open?: boolean;
       shared?: boolean;
       icon_name?: string;
+      max_documents?: number;
     },
   ) =>
     request<KnowledgeBase>(`/knowledge-bases/${id}`, {
@@ -252,4 +255,13 @@ export const knowledgeBasesApi = {
     request<{ enqueued: number }>(`/knowledge-bases/${id}/reindex`, {
       method: "POST",
     }),
+
+  renameDocument: (id: string, documentId: string, newName: string) =>
+    request<KnowledgeDocument>(
+      `/knowledge-bases/${id}/documents/${documentId}/rename`,
+      {
+        method: "POST",
+        body: JSON.stringify({ new_name: newName }),
+      },
+    ),
 };

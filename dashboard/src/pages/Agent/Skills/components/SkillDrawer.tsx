@@ -33,6 +33,10 @@ export interface MetadataEntry {
 export interface SkillFormValues {
   name: string;
   description: string;
+  labelZh?: string;
+  labelEn?: string;
+  summaryZh?: string;
+  summaryEn?: string;
   /** Surfaced as ``metadata.octop.emoji`` in SKILL.md. */
   emoji: string;
   metadata: MetadataEntry[];
@@ -43,16 +47,30 @@ export interface SkillFormValues {
 }
 
 export const OCTOP_EMOJI_META_KEY = "octop.emoji";
+const OCTOP_LABEL_ZH_META_KEY = "octop.label.zh";
+const OCTOP_LABEL_EN_META_KEY = "octop.label.en";
+const OCTOP_SUMMARY_ZH_META_KEY = "octop.summary.zh";
+const OCTOP_SUMMARY_EN_META_KEY = "octop.summary.en";
+const PRESENTATION_META_KEYS = new Set([
+  OCTOP_LABEL_ZH_META_KEY,
+  OCTOP_LABEL_EN_META_KEY,
+  OCTOP_SUMMARY_ZH_META_KEY,
+  OCTOP_SUMMARY_EN_META_KEY,
+]);
 
 /**
  * The skill name doubles as the workspace directory slug, so only
  * filesystem-hostile characters are rejected - CJK and other Unicode
  * letters are allowed.
  */
-const SKILL_NAME_PATTERN = /^(?!\.)[^\\/:*?"<>|\x00-\x1f]{1,64}$/;
+const SKILL_NAME_PATTERN = /^(?!\.)[^\\/:*?"<>|]{1,64}$/;
 
 export function isValidSkillName(name: string): boolean {
-  return SKILL_NAME_PATTERN.test(name.trim());
+  const trimmed = name.trim();
+  return (
+    SKILL_NAME_PATTERN.test(trimmed) &&
+    !Array.from(trimmed).some((char) => char.charCodeAt(0) <= 0x1f)
+  );
 }
 
 function yamlQuote(value: string): string {
@@ -131,6 +149,24 @@ function withEmojiMetadata(
   return [{ key: OCTOP_EMOJI_META_KEY, value }, ...rest];
 }
 
+function withPresentationMetadata(
+  pairs: MetadataEntry[] | undefined,
+  values: SkillFormValues,
+): MetadataEntry[] {
+  const rest = (pairs ?? []).filter(
+    (row) => !PRESENTATION_META_KEYS.has(row.key.trim()),
+  );
+  const presentation = [
+    [OCTOP_LABEL_ZH_META_KEY, values.labelZh],
+    [OCTOP_LABEL_EN_META_KEY, values.labelEn],
+    [OCTOP_SUMMARY_ZH_META_KEY, values.summaryZh],
+    [OCTOP_SUMMARY_EN_META_KEY, values.summaryEn],
+  ]
+    .filter((entry): entry is [string, string] => Boolean(entry[1]?.trim()))
+    .map(([key, value]) => ({ key, value: value.trim() }));
+  return [...presentation, ...rest];
+}
+
 function buildMetadataObject(
   pairs: MetadataEntry[] | undefined,
 ): Record<string, unknown> {
@@ -150,7 +186,10 @@ export function buildSkillMarkdown(values: SkillFormValues): string {
     `description: ${yamlQuote(values.description.trim())}`,
   ];
   const meta = buildMetadataObject(
-    withEmojiMetadata(values.metadata, values.emoji ?? ""),
+    withEmojiMetadata(
+      withPresentationMetadata(values.metadata, values),
+      values.emoji ?? "",
+    ),
   );
   if (Object.keys(meta).length > 0) {
     lines.push("metadata:");
@@ -210,11 +249,19 @@ function parseSkillFormFromDetail(detail: SkillDetail): SkillFormValues {
     flattenMetadata(fm.metadata),
     detail.emoji?.trim() || DEFAULT_SKILL_EMOJI,
   );
+  const presentationValue = (key: string) =>
+    metadata.find((entry) => entry.key === key)?.value ?? "";
   return {
     name: displayName,
     description,
+    labelZh: presentationValue(OCTOP_LABEL_ZH_META_KEY),
+    labelEn: presentationValue(OCTOP_LABEL_EN_META_KEY),
+    summaryZh: presentationValue(OCTOP_SUMMARY_ZH_META_KEY),
+    summaryEn: presentationValue(OCTOP_SUMMARY_EN_META_KEY),
     emoji,
-    metadata,
+    metadata: metadata.filter(
+      (entry) => !PRESENTATION_META_KEYS.has(entry.key),
+    ),
     body: detail.body || "",
     content: detail.raw,
     source: detail.kind === "builtin" ? "builtin" : "workspace",
@@ -486,6 +533,37 @@ export function SkillDrawer({
     </Form.Item>
   );
 
+  const presentationFields = (
+    <>
+      <Form.Item name="labelZh" label={t("skills.displayNameZh")}>
+        <Input
+          placeholder={t("skills.displayNameZhPlaceholder")}
+          disabled={!fieldsEditable}
+        />
+      </Form.Item>
+      <Form.Item name="labelEn" label={t("skills.displayNameEn")}>
+        <Input
+          placeholder={t("skills.displayNameEnPlaceholder")}
+          disabled={!fieldsEditable}
+        />
+      </Form.Item>
+      <Form.Item name="summaryZh" label={t("skills.displaySummaryZh")}>
+        <Input.TextArea
+          placeholder={t("skills.displaySummaryZhPlaceholder")}
+          autoSize={{ minRows: 2, maxRows: 3 }}
+          disabled={!fieldsEditable}
+        />
+      </Form.Item>
+      <Form.Item name="summaryEn" label={t("skills.displaySummaryEn")}>
+        <Input.TextArea
+          placeholder={t("skills.displaySummaryEnPlaceholder")}
+          autoSize={{ minRows: 2, maxRows: 3 }}
+          disabled={!fieldsEditable}
+        />
+      </Form.Item>
+    </>
+  );
+
   const emojiField = (
     <Form.Item
       name="emoji"
@@ -709,6 +787,7 @@ export function SkillDrawer({
                 <div className={styles.createFields}>
                   {nameField}
                   {descriptionField}
+                  {presentationFields}
                   {emojiField}
                   {metadataFields}
                 </div>
@@ -722,6 +801,7 @@ export function SkillDrawer({
           <div className={styles.viewScroll}>
             {nameField}
             {descriptionField}
+            {presentationFields}
             {emojiField}
             <Form.Item name="source" label={t("skills.sourceLabel")}>
               <Input disabled />

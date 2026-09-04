@@ -13,7 +13,22 @@ AuthKind = Literal[
     "imap_app_password",
     "session_cookie",
     "api_credentials",
+    "custom_fields",
 ]
+
+CredentialFieldType = Literal["text", "password", "url", "tags"]
+RemoteTransport = Literal["raw_http", "streamable_http", "sse"]
+
+
+@dataclass(frozen=True)
+class ConnectorCredentialField:
+    key: str
+    label: str
+    field_type: CredentialFieldType = "text"
+    required: bool = True
+    placeholder: str | None = None
+    help: str | None = None
+    secret: bool = False
 
 
 @dataclass(frozen=True)
@@ -35,6 +50,37 @@ class ConnectorCatalogEntry:
     # Optional allowlist of tool names exposed to the LLM.
     # None means no restriction (all tools from the MCP server are available).
     allowed_tools: tuple[str, ...] | None = None
+    # Catalog-driven remote MCP OAuth (Notion / Ardot / Linear…):
+    # when auth_kind=oauth2 + mcp_mode=remote and both issuer + mcp_url are set,
+    # Octop uses DCR + PKCE against oauth_issuer and talks to mcp_url.
+    oauth_issuer: str | None = None
+    mcp_url: str | None = None
+    oauth_resource: str | None = None
+    oauth_scopes: str | None = None
+    mcp_user_agent: str | None = None
+    credential_fields: tuple[ConnectorCredentialField, ...] = ()
+    remote_transport: RemoteTransport = "raw_http"
+
+
+def is_mcp_oauth_remote(entry: ConnectorCatalogEntry) -> bool:
+    """True when this catalog entry is a dynamic-OAuth remote MCP connector."""
+    return (
+        entry.auth_kind == "oauth2"
+        and entry.mcp_mode == "remote"
+        and bool(entry.oauth_issuer)
+        and bool(entry.mcp_url)
+    )
+
+
+def mcp_oauth_remote_kinds() -> frozenset[str]:
+    return frozenset(e.kind for e in _CATALOG if is_mcp_oauth_remote(e))
+
+
+def get_mcp_oauth_remote(kind: str) -> ConnectorCatalogEntry | None:
+    entry = get_catalog_entry(kind)
+    if entry is None or not is_mcp_oauth_remote(entry):
+        return None
+    return entry
 
 
 _CATALOG: tuple[ConnectorCatalogEntry, ...] = (
@@ -274,6 +320,22 @@ _CATALOG: tuple[ConnectorCatalogEntry, ...] = (
         auth_hint="登录元典开放平台获取 sk_ 开头的 API Key 并粘贴到下方",
     ),
     ConnectorCatalogEntry(
+        kind="tencent-ardot",
+        name="腾讯设计 Ardot",
+        description="腾讯设计平台官方 MCP：设计稿读写、设计系统与导出",
+        auth_kind="oauth2",
+        doc_url="https://docs.ardot.tencent.com/ardot-mcp/introduction.html",
+        icon="tencent-ardot",
+        color="#8b5cf6",
+        phase="available",
+        mcp_mode="remote",
+        guide_url="https://docs.ardot.tencent.com/ardot-mcp.html",
+        auth_hint="点击「一键授权」完成 Ardot 登录（成功后自动保存），或按文档手动粘贴 Token",
+        oauth_issuer="https://ardot.tencent.com",
+        mcp_url="https://ardot.tencent.com/mcp",
+        oauth_resource="https://ardot.tencent.com/mcp",
+    ),
+    ConnectorCatalogEntry(
         kind="youdao-note",
         name="有道云笔记",
         description="官方 MCP：笔记创建、搜索、整理与管理",
@@ -298,9 +360,29 @@ _CATALOG: tuple[ConnectorCatalogEntry, ...] = (
         color="#000000",
         phase="available",
         mcp_mode="remote",
-        quick_auth_url="https://developers.notion.com/guides/mcp/get-started-with-mcp",
         guide_url="https://developers.notion.com/guides/mcp/get-started-with-mcp",
-        auth_hint="点击「一键授权」完成 Notion 登录，或按官方文档手动获取 Token",
+        auth_hint="点击「一键授权」完成 Notion 登录（成功后自动保存），或按官方文档手动获取 Token",
+        oauth_issuer="https://mcp.notion.com",
+        mcp_url="https://mcp.notion.com/mcp",
+        mcp_user_agent="octop-connector/0.1",
+    ),
+    ConnectorCatalogEntry(
+        kind="dida365",
+        name="滴答清单",
+        description="官方 MCP：任务、清单、习惯与专注记录",
+        auth_kind="oauth2",
+        doc_url="https://help.dida365.com/articles/7438132116019216384",
+        icon="dida365",
+        color="#e74c3c",
+        phase="available",
+        mcp_mode="remote",
+        guide_url="https://help.dida365.com/articles/7438132116019216384",
+        manual_url="https://dida365.com",
+        auth_hint="点击「一键授权」完成登录（成功后自动保存），或在网页版「头像 → 设置 → 账户与安全 → API 口令」创建并粘贴 Token",
+        oauth_issuer="https://dida365.com",
+        mcp_url="https://mcp.dida365.com",
+        oauth_resource="https://mcp.dida365.com/",
+        oauth_scopes="tasks:read tasks:write",
     ),
     ConnectorCatalogEntry(
         kind="feishu-cli",
@@ -329,6 +411,73 @@ _CATALOG: tuple[ConnectorCatalogEntry, ...] = (
         guide_url="https://open.work.weixin.qq.com/help2/pc/21676",
         manual_url="https://open.work.weixin.qq.com/help2/pc/cat?doc_id=21677",
         auth_hint="填写长连接智能机器人 Bot ID 与 Secret；主机需已安装 @wecom/cli（wecom-cli）",
+    ),
+    ConnectorCatalogEntry(
+        kind="weknora",
+        name="WeKnora",
+        description="连接 WeKnora 私有知识库，提供只读检索与文档阅读",
+        auth_kind="custom_fields",
+        doc_url="https://github.com/Tencent/WeKnora",
+        icon="weknora",
+        color="#0052d9",
+        phase="available",
+        mcp_mode="gateway",
+        guide_url="https://github.com/Tencent/WeKnora/blob/main/docs/api/README.md",
+        auth_hint="填写 WeKnora 服务地址；API Key 与 Tenant ID 按部署的鉴权设置填写。",
+        credential_fields=(
+            ConnectorCredentialField(
+                key="base_url",
+                label="服务地址",
+                field_type="url",
+                placeholder="http://127.0.0.1:8080 或 https://weknora.example.com",
+                help="未包含 /api/v1 时会自动补齐",
+            ),
+            ConnectorCredentialField(
+                key="api_key",
+                label="API Key",
+                field_type="password",
+                required=False,
+                placeholder="sk-...（无鉴权部署可留空）",
+                secret=True,
+            ),
+            ConnectorCredentialField(
+                key="tenant_id",
+                label="Tenant ID",
+                required=False,
+                help="平台级 API Key 需要指定工作空间时填写",
+            ),
+            ConnectorCredentialField(
+                key="knowledge_base_ids",
+                label="默认知识库 ID",
+                field_type="tags",
+                required=False,
+                placeholder="kb-123, kb-456",
+                help="留空时检索当前凭证可见的全部知识库",
+            ),
+        ),
+    ),
+    ConnectorCatalogEntry(
+        kind="dify",
+        name="Dify",
+        description="连接 Dify 已发布应用或工作流的 MCP 服务",
+        auth_kind="custom_fields",
+        doc_url="https://docs.dify.ai/",
+        icon="dify",
+        color="#1c64f2",
+        phase="available",
+        mcp_mode="remote",
+        auth_hint="在 Dify 应用的访问点中启用 MCP，然后粘贴完整的 MCP Server URL。",
+        credential_fields=(
+            ConnectorCredentialField(
+                key="mcp_url",
+                label="MCP Server URL",
+                field_type="url",
+                placeholder="https://dify.example.com/mcp/server/<server_code>/mcp",
+                help="完整 URL 含访问标识，将按密钥加密保存",
+                secret=True,
+            ),
+        ),
+        remote_transport="streamable_http",
     ),
 )
 
@@ -367,5 +516,17 @@ def catalog_entry_to_dict(
         "auth_hint": entry.auth_hint,
         "oauth_mode": oauth_mode,
         "oauth_ready": oauth_ready,
+        "credential_fields": [
+            {
+                "key": field.key,
+                "label": field.label,
+                "field_type": field.field_type,
+                "required": field.required,
+                "placeholder": field.placeholder,
+                "help": field.help,
+                "secret": field.secret,
+            }
+            for field in entry.credential_fields
+        ],
         "supports_quick_auth": entry.phase == "available" and entry.auth_kind != "api_credentials",
     }

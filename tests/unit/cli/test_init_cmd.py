@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -13,8 +14,13 @@ from octop.cli.main import cli
 
 @pytest.fixture
 def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    octop_home = tmp_path / ".octop"
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("OCTOP_HOME", str(octop_home))
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    for key in list(os.environ):
+        if key.startswith("OCTOP_DATABASE_"):
+            monkeypatch.delenv(key, raising=False)
     return tmp_path
 
 
@@ -34,6 +40,10 @@ def test_init_non_interactive_creates_admin(fake_home: Path) -> None:
     assert result.exit_code == 0, result.output
     assert (fake_home / ".octop").is_dir()
     assert (fake_home / ".octop" / "octop.db").is_file()
+    weather = fake_home / ".octop" / "plugins" / "weather" / "plugin.yaml"
+    assert weather.is_file()
+    cfg = json.loads((fake_home / ".octop" / "config.json").read_text(encoding="utf-8"))
+    assert cfg["plugins"]["weather"]["enabled"] is False
 
     from octop.infra.db.pool import SqlitePool
     from octop.infra.db.repos.users import UserRepo
@@ -85,9 +95,10 @@ def test_init_force_resets(fake_home: Path) -> None:
         "TestPass34",
         "--yes",
     ]
-    runner.invoke(cli, args_a)
+    r1 = runner.invoke(cli, args_a)
+    assert r1.exit_code == 0, r1.output or str(r1.exception)
     r2 = runner.invoke(cli, args_b)
-    assert r2.exit_code == 0, r2.output
+    assert r2.exit_code == 0, r2.output or str(r2.exception)
 
     from octop.infra.db.pool import SqlitePool
     from octop.infra.db.repos.users import UserRepo

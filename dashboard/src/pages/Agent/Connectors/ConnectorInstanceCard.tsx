@@ -1,5 +1,4 @@
-import { Button, Modal } from "antd";
-import { message } from "@/utils/antdMessage";
+import { App, Button } from "antd";
 
 import { Activity, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -24,6 +23,7 @@ export function ConnectorInstanceCard({
   onDeleted,
 }: ConnectorInstanceCardProps) {
   const { t } = useTranslation();
+  const { modal, message } = App.useApp();
   const accent = catalogEntry ? connectorAccent(catalogEntry) : "#8c8c8c";
 
   const handleTest = async () => {
@@ -38,7 +38,7 @@ export function ConnectorInstanceCard({
   };
 
   const handleDelete = () => {
-    Modal.confirm({
+    modal.confirm({
       title: t("connectors.deleteConfirm", { name: instance.display_name }),
       okText: t("common.delete"),
       okButtonProps: { danger: true },
@@ -61,7 +61,7 @@ export function ConnectorInstanceCard({
           className={styles.instanceCardIcon}
           style={{ color: accent, background: `${accent}18` }}
         >
-          <ConnectorLogo kind={instance.kind} />
+          <ConnectorLogo kind={instance.kind} icon={catalogEntry?.icon} />
         </div>
         <div className={styles.instanceCardMeta}>
           <div className={styles.instanceCardName}>{instance.display_name}</div>
