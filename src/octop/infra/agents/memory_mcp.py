@@ -255,6 +255,26 @@ def build_memory_mcp(server: OctopServer, agent_id: str) -> FastMCP:
         caller = user or _caller_user(ctx)
         effective_session = session_id or _derive_session(source, caller)
         memory = _memory()
+
+        # Idempotent capture: skip if an identical raw event (same session +
+        # content) already exists, so re-ingesting the same conversation does
+        # not duplicate L0 events. Keeps downstream extraction re-runnable.
+        try:
+            for ev in memory.list_raw(session_id=effective_session, limit=1000):
+                if getattr(ev, "content", None) == content:
+                    return {
+                        "event_id": ev.id,
+                        "source": source,
+                        "user": caller or None,
+                        "session_id": effective_session,
+                        "recorded": True,
+                        "duplicate": True,
+                        "note": "raw (L0) event already present; skipped (idempotent capture)",
+                    }
+        except Exception:  # noqa: BLE001
+            # If duplicate detection fails, fall back to recording (safe).
+            pass
+
         raw = memory.add_raw(
             content,
             event_type="manual",
