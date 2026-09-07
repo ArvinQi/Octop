@@ -29,7 +29,7 @@ from __future__ import annotations
 import logging
 import os
 from contextvars import ContextVar
-from typing import Any
+from typing import Any, get_args
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.server import Context
@@ -413,14 +413,20 @@ def build_memory_mcp(server: OctopServer, agent_id: str) -> FastMCP:
         memory = _memory()
         from harness_memory.core import CandidateStatus  # noqa: PLC0415
 
-        status_enum = None
+        # ``CandidateStatus`` is a ``typing.Literal`` (not an Enum), so it cannot
+        # be instantiated: ``CandidateStatus(status)`` raises ``TypeError``. The
+        # backend stores status as a plain string, so validate the caller's value
+        # against the literal and pass the string straight through.
+        status_value: str | None = None
         if status:
-            try:
-                status_enum = CandidateStatus(status)
-            except ValueError:
-                status_enum = None
+            allowed = set(get_args(CandidateStatus))
+            if status not in allowed:
+                raise ValueError(
+                    f"invalid candidate status {status!r}; expected one of {sorted(allowed)}"
+                )
+            status_value = status
         candidates = memory.list_candidates(
-            status=status_enum,
+            status=status_value,
             session_id=session_id,
             limit=limit,
         )
@@ -515,11 +521,12 @@ def build_memory_mcp(server: OctopServer, agent_id: str) -> FastMCP:
             reason: rejection reason.
         """
         memory = _memory()
-        from harness_memory.core import CandidateStatus  # noqa: PLC0415
 
+        # ``CandidateStatus`` is a ``typing.Literal``, not an Enum, so
+        # ``CandidateStatus.REJECTED`` does not exist. Pass the literal string.
         ok = memory.update_candidate_status(
             candidate_id,
-            status=CandidateStatus.REJECTED,
+            status="rejected",
             decided_by="mcp-external",
             promotion_reason=reason,
         )
