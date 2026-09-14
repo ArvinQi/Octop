@@ -278,10 +278,11 @@ def build_app(server: OctopServer) -> FastAPI:
 
     memory_mcp_managers = mount_memory_mcp(app, server)
     if memory_mcp_managers:
+        from collections.abc import AsyncIterator
         from contextlib import AsyncExitStack, asynccontextmanager
 
         @asynccontextmanager
-        async def _memory_mcp_lifespan(application: FastAPI):
+        async def _memory_mcp_lifespan(application: FastAPI) -> AsyncIterator[None]:
             # streamable_http_app 的 task group 依赖 lifespan，挂载后须手动并入
             async with AsyncExitStack() as stack:
                 for mgr in memory_mcp_managers:
