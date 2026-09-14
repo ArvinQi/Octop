@@ -272,3 +272,26 @@ def test_trigger_extract_schedules_service(monkeypatch):
     time.sleep(0.1)
     service.extract.assert_called()
     assert service.extract.call_args.args[0] == "kiro-chat"
+
+
+def test_memory_candidates_passes_status_string(fake_memory):
+    """``status`` is a typing.Literal of strings: pass the raw value, don't
+    instantiate it (previously crashed with "Cannot instantiate typing.Literal")."""
+    fake_memory.list_candidates.return_value = []
+    mcp = mm.build_memory_mcp(mock.MagicMock(), "A1")
+    result = _tools(mcp)["memory_candidates"].fn(status="pending", limit=5)
+    assert result["candidates"] == []
+    assert fake_memory.list_candidates.call_args.kwargs["status"] == "pending"
+
+
+def test_memory_candidates_not_a_status_raises(fake_memory):
+    mcp = mm.build_memory_mcp(mock.MagicMock(), "A1")
+    with pytest.raises(ValueError):
+        _tools(mcp)["memory_candidates"].fn(status="no-such-status")
+
+
+def test_memory_reject_passes_literal_status(fake_memory):
+    mcp = mm.build_memory_mcp(mock.MagicMock(), "A1")
+    result = _tools(mcp)["memory_reject"].fn(candidate_id="c1", reason="dup")
+    assert result["status"] == "rejected"
+    assert fake_memory.update_candidate_status.call_args.kwargs["status"] == "rejected"
