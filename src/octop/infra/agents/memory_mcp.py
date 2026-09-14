@@ -6,8 +6,9 @@ capabilities. Every write stamps a ``source`` marker that can be traced back
 on recall.
 
 Expert binding: the endpoint is a single ``/mcp/memory`` mount; the expert is
-selected at connect time via the ``X-Octop-Agent-Id`` header (one connection
-binds one expert — the caller never passes an agent id per tool call).
+selected per request via the ``X-Octop-Agent-Id`` header, validated against the
+agent registry on every call — the caller never passes an agent id per tool
+call, and the URL itself does not leak expert ids.
 
 raw vs atom (aligned with ``MemoryService``):
 
@@ -19,6 +20,24 @@ raw vs atom (aligned with ``MemoryService``):
 * ``memory_save`` -> ``store``: persists a structured fact directly into the
   canonical atom/tree (durable, no extraction). Use it when you already know
   the exact fact to remember.
+
+Read surface (three tools, same storage as the in-process ``memory_search`` /
+``memory_get`` exposed to Octop's own agents):
+
+* ``memory_recall`` -> ``recall_for_prompt``: ranked, prompt-injectable text.
+  L2 atoms first; ``page`` headlines are folded into atom hits; L0 raw is only
+  a fallback (dropped as soon as any atom matches).
+* ``memory_search`` -> ``MemoryRuntime.memory_search`` (``corpus=raw`` uses
+  ``Memory.search_raw``): the same ranking, returned as hits that carry a
+  virtual ``path`` instead of rendered markdown.
+* ``memory_get`` -> ``MemoryRuntime.memory_get``: resolve that path to the full
+  markdown (``atom/<id>.md`` / ``page/<entity_id>.md`` / ``raw/<date>/<id>.md``).
+
+Sender attribution: ``X-Octop-User-Id`` identifies the caller, and every write
+(``memory_capture`` / ``memory_save`` / ``memory_update``) prefixes the content
+with ``<user>说：``. harness-memory's ``AtomCard`` has no user column, so putting
+the sender into the text is what makes it reach the atom, stay FTS-searchable
+(a query naming the sender matches), and remain visible on recall.
 
 Auth: independent token via ``OCTOP_MEMORY_MCP_TOKEN`` (fail-closed when
 unset), enforced by the ASGI middleware in ``mount_memory_mcp``.
@@ -40,10 +59,19 @@ from octop.infra.server import OctopServer
 
 logger = logging.getLogger(__name__)
 
-# 当前 MCP HTTP 请求的调用者 user id（由 _AgentRouter 中间件写入，工具读取）。
+# 当前 MCP HTTP 请求的绑定状态（由 _AgentRouter 中间件写入，工具读取）。
 # stateless streamable HTTP 下 mcp SDK 不提供 ctx.request_context，故用 contextvar
-# 跨 ASGI 中间件 → 工具传递，供 memory_capture/save 做 per-user 追溯。
+# 跨 ASGI 中间件 → 工具传递：
+#   - _current_agent_id:   本次请求绑定的 expert（X-Octop-Agent-Id 校验后写入）
+#   - _current_caller_user: 调用者 user id（供 memory_capture/save 做 per-user 追溯）
+_current_agent_id: ContextVar[str] = ContextVar("octop_mcp_agent_id", default="")
 _current_caller_user: ContextVar[str] = ContextVar("octop_mcp_caller_user", default="")
+
+_SEARCH_CORPORA: frozenset[str] = frozenset({"all", "memory", "atom", "raw"})
+"""Corpora ``memory_search`` accepts. ``atom``/``raw`` are layer filters over the
+recall pipeline; ``all``/``memory`` are the same pipeline without a filter."""
+
+_SNIPPET_CHARS = 200
 
 
 def _open_memory(server: OctopServer, agent_id: str) -> Any:
@@ -86,10 +114,63 @@ def _open_memory(server: OctopServer, agent_id: str) -> Any:
     return Memory(namespace=ns, backend=backend, backend_config=backend_config)
 
 
-def build_memory_mcp(server: OctopServer, agent_id: str) -> FastMCP:
-    """Build an MCP server bound to one expert (``agent_id`` captured in closure)."""
+def _snippet(text: str) -> str:
+    """Cap a raw event body so ``memory_search`` hits stay small (``memory_get`` reads the rest)."""
+    body = (text or "").strip()
+    return body if len(body) <= _SNIPPET_CHARS else body[: _SNIPPET_CHARS - 1].rstrip() + "…"
+
+
+def _attributed(content: str, caller: str) -> str:
+    """Prefix the sender so the caller id lives inside the text.
+
+    harness-memory's ``AtomCard`` has no user column, so the sender is stamped
+    by writing ``<user>说：`` into the content itself: it then reaches the atom's
+    assertion (manual writes) or its raw event (captured events), stays
+    FTS-searchable, and shows up verbatim on recall. Already-prefixed content is
+    left untouched so a re-capture cannot double it.
+    """
+    name = (caller or "").strip()
+    if not name:
+        return content
+    prefix = f"{name}说："
+    return content if content.startswith(prefix) else prefix + content
+
+
+def _pipeline_hits(
+    memory: Any, query: str, max_results: int, *, atom_only: bool
+) -> list[dict[str, Any]]:
+    """Run the in-process multi-source search and return its path-carrying hits.
+
+    ``atom_only`` keeps just L2 atoms, so the request is widened first —
+    otherwise raw hits could crowd the atoms out before the filter runs.
+    """
+    from harness_memory.application.runtime import MemoryRuntime  # noqa: PLC0415
+
+    runtime = MemoryRuntime(memory)
+    result = runtime.memory_search(
+        {
+            "query": query,
+            "maxResults": max_results * 4 if atom_only else max_results,
+            "corpus": "memory",
+        }
+    )
+    hits = list(result.get("hits") or [])
+    if atom_only:
+        hits = [hit for hit in hits if hit.get("layer") == "atom"]
+    return hits[:max_results]
+
+
+def build_memory_mcp(server: OctopServer) -> FastMCP:
+    """Build the shared memory MCP app (expert bound per request, not per build).
+
+    The expert is selected at request time by ``X-Octop-Agent-Id`` (validated
+    against the agent repo by ``_AgentRouter``) and carried to the tools via the
+    ``_current_agent_id`` contextvar. A single app is shared by every expert, so
+    agents created or disabled after process start are honored immediately —
+    no process restart is needed to pick up new agents.
+    """
     mcp = FastMCP(
-        f"octop-memory-{agent_id}",
+        "octop-memory",
         # Stateless streamable HTTP: every request gets a fresh transport, no
         # Mcp-Session-Id tracking. Session state is in-memory per process, so a
         # server restart silently orphans every client session id and the next
@@ -107,8 +188,15 @@ def build_memory_mcp(server: OctopServer, agent_id: str) -> FastMCP:
     # /mcp/memory (the default "/mcp" would make it /mcp/memory/mcp).
     mcp.settings.streamable_http_path = "/"
 
+    def _agent_id() -> str:
+        """Agent bound to this request (set by ``_AgentRouter`` from the header)."""
+        agent_id = _current_agent_id.get()
+        if not agent_id:
+            raise RuntimeError("X-Octop-Agent-Id header not bound to this request")
+        return agent_id
+
     def _memory() -> Any:
-        return _open_memory(server, agent_id)
+        return _open_memory(server, _agent_id())
 
     def _caller_user(ctx: Any | None) -> str:
         """读取当前 MCP 请求的调用者 user id。
@@ -131,7 +219,6 @@ def build_memory_mcp(server: OctopServer, agent_id: str) -> FastMCP:
         """
         return f"ext:{source or 'mcp'}:{user or 'anon'}"
 
-
     @mcp.tool()
     def memory_recall(
         query: str,
@@ -139,22 +226,27 @@ def build_memory_mcp(server: OctopServer, agent_id: str) -> FastMCP:
         user: str | None = None,
         ctx: Context | None = None,  # type: ignore[type-arg]
     ) -> dict[str, Any]:
-        """Recall memories from this expert (aligned with the in-process recall_inject).
+        """**召回专家记忆（读入口首选）**：把与 query 相关的记忆召回进上下文。
 
-        **日常使用**：每次对话/任务开始前调用，把专家记忆中与 query 相关的
-        atom 召回注入上下文。运行完整召回管线（tokenize -> FTS -> rerank ->
-        dedupe），返回结构化片段 + 可注入 system prompt 的 markdown 块。
+        每次对话/任务开始前先调一次。运行完整召回管线（分词 → 路由 → FTS →
+        重排 → 去重 → token 预算），返回结构化片段 + 可直接注入 system prompt 的 markdown。
 
-        调用者身份（``X-Octop-User-Id`` header 或 ``user`` 参数）会记录在
-        返回的 ``caller`` 字段，供按调用者追溯召回来源；记忆本身是专家级
-        共享，不按用户隔离。
+        三个读工具怎么选：
+        - 只想把相关背景拉进上下文 → 用本工具（一次调用，``rendered`` 直接可注入）。
+        - 要**定位某条具体记忆并读全文** → ``memory_search`` 拿 ``path``，
+          再 ``memory_get(path)`` 读完整 markdown（支持分页）。
+        - 要**原话/证据**，或 ``memory_capture`` 刚写入、还没晋升成原子的内容 →
+          ``memory_raws``（L0 全文检索，capture 后立即可见）。
+
+        覆盖范围（与内置 ``memory_search`` 同一套管线）：L2 原子优先，``page``
+        主题页标题会并入 atom 命中；L0 原始事件只做兜底——只要有原子命中，raw 就被
+        整层丢弃。L1 候选不在召回范围内，请用 ``memory_candidates``。
 
         Args:
-            query: free-form question / keywords (pass the whole sentence; the
-                pipeline tokenizes CJK into n-grams internally).
-            limit: max number of snippets to return.
-            user: optional caller id (overrides the ``X-Octop-User-Id`` header).
-            ctx: injected MCP context (reads ``X-Octop-User-Id`` header).
+            query: 自然语言问题/关键词，整句传入（内部对中文做 n-gram 分词）。
+            limit: 最多返回片段数，默认 5。
+            user: 可选调用者 id（覆盖 ``X-Octop-User-Id`` 头）。
+            ctx: MCP 注入的上下文（读取 ``X-Octop-User-Id`` 头）。
         """
         from harness_memory.pipeline.recall import recall_for_prompt  # noqa: PLC0415
 
@@ -177,6 +269,102 @@ def build_memory_mcp(server: OctopServer, agent_id: str) -> FastMCP:
         }
 
     @mcp.tool()
+    def memory_search(
+        query: str,
+        max_results: int = 5,
+        corpus: str = "all",
+    ) -> dict[str, Any]:
+        """**检索记忆（返回可下钻的 path）**：全文检索记忆，返回带虚拟路径的命中列表。
+
+        与 ``memory_recall`` 走同一套召回/重排管线，区别是本工具不渲染 markdown，而是给
+        每条命中一个 ``path``，交给 ``memory_get`` 读全文。要"引用出处/读全文"用
+        search + get，只想"把背景拉进上下文"用 ``memory_recall``，要"原话/证据"用
+        ``memory_raws``。
+
+        Args:
+            query: 自然语言问题/关键词（中文会做 n-gram 分词）。
+            max_results: 最多返回命中数，默认 5。
+            corpus: 检索范围：
+                ``all``（默认）/``memory`` = 原子(L2)+原始事件(L0)同一套管线；
+                ``atom`` = 只要 L2 原子命中；
+                ``raw`` = 直接走 L0 全文检索，不受"有原子命中就丢 raw"的兜底策略影响，
+                适合找刚 ``memory_capture``、还没晋升成原子的内容。
+        """
+        corpus_value = (corpus or "all").strip().lower()
+        if corpus_value not in _SEARCH_CORPORA:
+            raise ValueError(
+                f"invalid corpus {corpus!r}; expected one of {sorted(_SEARCH_CORPORA)}"
+            )
+        memory = _memory()
+        if corpus_value == "raw":
+            from harness_memory.application.path_projection import raw_to_path  # noqa: PLC0415
+
+            hits = [
+                {
+                    "path": raw_to_path(event),
+                    "layer": "raw",
+                    "snippet": _snippet(event.content),
+                    "occurred_at": event.timestamp.isoformat(),
+                    "source_id": event.id,
+                }
+                for event in memory.search_raw(query, limit=max_results)
+            ]
+        else:
+            hits = _pipeline_hits(memory, query, max_results, atom_only=corpus_value == "atom")
+        return {
+            "hits": hits,
+            "total": len(hits),
+            "corpus": corpus_value,
+            "hint": "每条命中自带 path，可交给 memory_get(path) 读全文",
+        }
+
+    @mcp.tool()
+    def memory_get(
+        path: str,
+        start: int | None = None,
+        lines: int | None = None,
+    ) -> dict[str, Any]:
+        """**读取记忆全文**：把 ``memory_search`` / ``memory_recall`` 命中的虚拟路径解析成 markdown。
+
+        支持的路径形态：``atom/<atom_id>.md``（L2 原子）、``page/<entity_id>.md``
+        （L3 主题页）、``raw/<YYYY-MM-DD>/<event_id>.md``（L0 原始事件）。长内容用
+        ``start`` / ``lines`` 分页（配合返回的 ``total_lines`` / ``truncated``）。
+
+        Args:
+            path: 虚拟路径，取自 ``memory_search`` 的 ``hits[].path``。
+            start: 可选起始行号（1-based）。
+            lines: 可选返回行数。
+        """
+        from harness_memory.application.runtime import MemoryRuntime  # noqa: PLC0415
+
+        params: dict[str, Any] = {"path": path}
+        if start is not None:
+            params["from"] = start
+        if lines is not None:
+            params["lines"] = lines
+        try:
+            result = MemoryRuntime(_memory()).memory_get(params)
+        except Exception as exc:  # stale / mistyped path from a previous call
+            return {
+                "path": path,
+                "error": f"{exc.__class__.__name__}: {exc}",
+                "hint": (
+                    "path 形如 atom/<atom_id>.md / page/<entity_id>.md / "
+                    "raw/<YYYY-MM-DD>/<event_id>.md，取自 memory_search 的 hits[].path"
+                ),
+            }
+        return {
+            "path": result.get("path", path),
+            "kind": result.get("kind"),
+            "content": result.get("excerpt") or "",
+            "total_lines": result.get("total_lines"),
+            "from_line": result.get("from_line"),
+            "to_line": result.get("to_line"),
+            "truncated": result.get("truncated"),
+            "metadata": result.get("metadata") or {},
+        }
+
+    @mcp.tool()
     def memory_save(
         content: str,
         source: str,
@@ -184,25 +372,24 @@ def build_memory_mcp(server: OctopServer, agent_id: str) -> FastMCP:
         user: str | None = None,
         ctx: Context | None = None,  # type: ignore[type-arg]
     ) -> dict[str, Any]:
-        """Persist a structured fact directly (atom/tree, durable, no extraction).
+        """**直接保存事实**：把一条已知事实写入原子层（跳过提取，立即可召回）。
 
-        **显式记忆**（非日常）：仅当你知道一个明确的、需要长期记住的事实
-        时才调用（如用户偏好、项目约定）。立即通过 ``memory_recall`` 可召回，
-        不经过提取管线。日常对话内容请用 ``memory_capture`` 交给自动提取。
-        The source marker is stored in ``metadata.source``; the caller id (from
-        ``X-Octop-User-Id`` header or ``user`` arg) is stored in ``metadata.user``.
+        用于明确、需长期记住的事实（如用户偏好、项目约定）。日常对话内容请用
+        ``memory_capture`` 交给提取管线。来源写入 ``metadata.source``，调用者写入 ``metadata.user``；
+        调用者 id 还会自动拼进内容前缀（``<user>说：…``），这样它随原子一起落库、可被检索、
+        召回时直接可见——不要把名字重复写进 ``content``。
 
         Args:
-            content: the fact to remember.
-            source: who/what recorded it (e.g. "coding-agent"), for traceability.
-            topic: optional topic label.
-            user: optional caller id (overrides the ``X-Octop-User-Id`` header).
-            ctx: injected MCP context (reads ``X-Octop-User-Id`` header).
+            content: 要记住的事实。
+            source: 谁记录的（如 "coding-agent"），用于追溯。
+            topic: 可选主题标签。
+            user: 可选调用者 id（覆盖 ``X-Octop-User-Id`` 头）。
+            ctx: MCP 注入的上下文（读取 ``X-Octop-User-Id`` 头）。
         """
         caller = user or _caller_user(ctx)
         memory = _memory()
         node = memory.store(
-            content,
+            _attributed(content, caller),
             topic=topic,
             metadata={"source": source, **({"user": caller} if caller else {})},
         )
@@ -221,71 +408,58 @@ def build_memory_mcp(server: OctopServer, agent_id: str) -> FastMCP:
         user: str | None = None,
         ctx: Context | None = None,  # type: ignore[type-arg]
     ) -> dict[str, Any]:
-        """Record a raw event to L0 (goes through extraction: extract -> candidate -> atom).
+        """**记录原始事件**：把一条原始内容写入 L0，交给提取流水线。
 
-        **日常使用**：把对话/事件原始内容记录下来，交给自动提取流水线
-        （extract -> candidate -> promote -> atom），稍后经 ``memory_recall``
-        可召回。记录后立即可用 ``memory_raws`` 查询。The source marker
-        is stored in ``payload.source``; the caller id (from ``X-Octop-User-Id``
-        header or ``user`` arg) is stored on the raw event for per-user
-        traceability.
-
-        If ``session_id`` is omitted it is derived as ``ext:{source}:{user}``
-        so external callers without an Octop native session still get their raw
-        events grouped and distilled into atoms (extraction groups by session).
-
-        Example::
-
-            memory_capture(
-                content="user reported: the report panel banner is not rendering",
-                source="review-bot",
-            )
-            # -> {"event_id": "...", "recorded": true, "extract_scheduled": true, ...}
-            # later: memory_recall(query="report panel banner not rendering")
+        日常使用入口：记录对话/事件，经 提取 → 候选 → 晋升 → 原子 成为记忆。
+        记录后立即可用 ``memory_raws`` 查询，晋升后才可被 ``memory_recall`` 召回。
+        调用者 id（``X-Octop-User-Id``）会自动拼成内容前缀 ``<user>说：…``：发送者由此进入
+        原子正文，既能被 FTS 直接搜到，也能在召回时一眼看出是谁说的——**不要**自己再
+        写一遍名字。
 
         Args:
-            content: the raw conversation / event text.
-            source: who/what recorded it, for traceability.
-            session_id: optional stable session id (e.g. caller name) so the
-                extraction pipeline can group events by session. When omitted,
-                derived as ``ext:{source}:{user}``.
-            user: optional caller id (overrides the ``X-Octop-User-Id`` header).
-            ctx: injected MCP context (reads ``X-Octop-User-Id`` header).
+            content: 原始对话/事件内容（不含发送者前缀）。
+            source: 谁记录的，用于追溯。
+            session_id: 可选会话 id，用于提取分组；缺省派生为 ``ext:{source}:{user}``。
+            user: 可选调用者 id（覆盖 ``X-Octop-User-Id`` 头）。
+            ctx: MCP 注入的上下文（读取 ``X-Octop-User-Id`` 头）。
         """
         caller = user or _caller_user(ctx)
         effective_session = session_id or _derive_session(source, caller)
         memory = _memory()
+        stored_content = _attributed(content, caller)
 
         # Idempotent capture: skip if an identical raw event (same session +
         # content) already exists, so re-ingesting the same conversation does
         # not duplicate L0 events. Keeps downstream extraction re-runnable.
         try:
             for ev in memory.list_raw(session_id=effective_session, limit=1000):
-                if getattr(ev, "content", None) == content:
+                if getattr(ev, "content", None) == stored_content:
                     return {
                         "event_id": ev.id,
+                        "content": ev.content,
                         "source": source,
                         "user": caller or None,
                         "session_id": effective_session,
                         "recorded": True,
                         "duplicate": True,
-                        "note": "raw (L0) event already present; skipped (idempotent capture)",
+                        "note": ("raw (L0) event already present; skipped (idempotent capture)"),
                     }
         except Exception:  # noqa: BLE001
             # If duplicate detection fails, fall back to recording (safe).
             pass
 
         raw = memory.add_raw(
-            content,
+            stored_content,
             event_type="manual",
             host="mcp-external",
             session_id=effective_session,
             user=caller or None,
             payload={"source": source},
         )
-        extract_scheduled = _trigger_extract(server, agent_id, effective_session)
+        extract_scheduled = _trigger_extract(server, effective_session)
         return {
             "event_id": raw.id,
+            "content": raw.content,
             "source": source,
             "user": caller or None,
             "session_id": effective_session,
@@ -307,26 +481,25 @@ def build_memory_mcp(server: OctopServer, agent_id: str) -> FastMCP:
         user: str | None = None,
         ctx: Context | None = None,  # type: ignore[type-arg]
     ) -> dict[str, Any]:
-        """Update a memory: deprecate the old atom and persist the new fact.
+        """**更新记忆**：废弃旧原子并写入新事实。
 
-        **显式更新**（非日常）：仅当已知旧记忆已过时、需要替换时才调用
-        （如用户纠正了一个事实）。旧 atom 标记 deprecated，新事实立即经
-        ``memory_recall`` 可召回。日常纠错也可以走 ``memory_capture`` 让
-        提取管线处理。
+        用于旧记忆已过时、需替换的场景（如纠正事实）。旧原子标记 deprecated，
+        新事实立即可被 ``memory_recall`` 召回，带 ``supersedes`` 关联。
+        与 ``memory_save`` 一样，调用者 id 会自动拼进内容前缀（``<user>说：…``）。
 
         Args:
-            atom_id: id of the atom to supersede.
-            new_content: the replacement fact.
-            source: who/what updated it, for traceability.
-            note: deprecation note.
-            user: optional caller id (overrides the ``X-Octop-User-Id`` header).
-            ctx: injected MCP context (reads ``X-Octop-User-Id`` header).
+            atom_id: 要废弃的旧原子 id。
+            new_content: 替代的新事实（不含发送者前缀）。
+            source: 谁更新的，用于追溯。
+            note: 废弃说明，默认 "mcp update"。
+            user: 可选调用者 id（覆盖 ``X-Octop-User-Id`` 头）。
+            ctx: MCP 注入的上下文（读取 ``X-Octop-User-Id`` 头）。
         """
         caller = user or _caller_user(ctx)
         memory = _memory()
         deprecated = memory.deprecate_atom(atom_id, actor="user", note=note)
         node = memory.store(
-            new_content,
+            _attributed(new_content, caller),
             metadata={
                 "source": source,
                 "supersedes": atom_id,
@@ -354,27 +527,30 @@ def build_memory_mcp(server: OctopServer, agent_id: str) -> FastMCP:
         limit: int = 50,
         ctx: Context | None = None,  # type: ignore[type-arg]
     ) -> dict[str, Any]:
-        """**L0 原始事件查询**：FTS 搜索或结构化过滤原始事件（证据源）。
+        """**查原始事件**：FTS 搜索或结构化过滤 L0 原始事件（证据源）。
 
-        合并了原 ``memory_search_raw``（全文搜索）与结构化过滤两种能力：
-        ``query`` 走 FTS 全文搜索（capture 立即可见，提取前也可查），
-        ``session_id``/``host``/``user`` 做结构化过滤。按时间倒序返回。
+        ``query`` 走全文搜索（capture 后立即可见），``session_id``/``host``/``user``
+        做结构化过滤，按时间倒序返回。
 
         Args:
-            query: FTS keywords to match raw event content (optional).
-            session_id: filter by session (e.g. ``ext:review-bot:user-alice``).
-            host: filter by recording host (e.g. ``mcp-external``).
-            user: filter by caller user id (also read from X-Octop-User-Id).
-            limit: max events (default 50).
-            ctx: injected MCP context.
+            query: FTS 关键词（可选）。
+            session_id: 按会话过滤（如 ``ext:review-bot:user-alice``）。
+            host: 按记录主机过滤（如 ``mcp-external``）。
+            user: 按调用者过滤。
+            limit: 最多返回条数，默认 50。
+            ctx: MCP 注入的上下文。
         """
         caller = user or _caller_user(ctx)
         memory = _memory()
-        events = memory.search_raw(query, limit=limit) if query else memory.list_raw(
-            session_id=session_id,
-            host=host,
-            user=user or (caller or None),
-            limit=limit,
+        events = (
+            memory.search_raw(query, limit=limit)
+            if query
+            else memory.list_raw(
+                session_id=session_id,
+                host=host,
+                user=user or (caller or None),
+                limit=limit,
+            )
         )
         return {
             "events": [
@@ -399,16 +575,15 @@ def build_memory_mcp(server: OctopServer, agent_id: str) -> FastMCP:
         session_id: str | None = None,
         limit: int = 50,
     ) -> dict[str, Any]:
-        """**L1 候选记忆列表**：查询待审核/已晋升/已拒绝的候选（提取产物）。
+        """**查候选记忆**：列出 L1 候选（默认 pending 队列）。
 
-        候选由 ``memory_capture`` 触发的提取流水线生成（或手动
-        ``memory_extract``）。默认返回 pending 队列；可用 ``status`` 过滤
+        候选由 ``memory_capture``/``memory_extract`` 生成。可用 ``status`` 过滤
         （pending / promoted / rejected / needs_review / conflict）。
 
         Args:
-            status: filter by candidate status (default pending).
-            session_id: filter by source session.
-            limit: max candidates (default 50).
+            status: 候选状态过滤，默认 pending。
+            session_id: 按来源会话过滤。
+            limit: 最多返回条数，默认 50。
         """
         memory = _memory()
         from harness_memory.core import CandidateStatus  # noqa: PLC0415
@@ -451,21 +626,19 @@ def build_memory_mcp(server: OctopServer, agent_id: str) -> FastMCP:
         limit: int = 100,
         promote: bool = False,
     ) -> dict[str, Any]:
-        """**手动触发记忆提取**（L0 → L1，可选直达 L2）：调度生产流水线。
+        """**手动触发提取**：把最近 L0 原始事件提取为候选（可选直达原子）。
 
-        复用专家进程内 ``MemoryService``（含配置的提取 LLM）同步执行提取：
-        取最近 ``limit`` 条 L0 原始事件 → LLM 类型化提取 → 候选（pending）；
-        ``promote=True`` 时对候选执行晋升检查（L1 → L2 atom），跳过人工审核。
-        运行时无 MemoryService 时返回 ``error``（best-effort）。
+        取最近 ``limit`` 条 L0 事件 → LLM 类型化提取 → 候选（pending）；
+        ``promote=True`` 时对候选执行晋升检查（L1 → L2），跳过人工审核。
 
         Args:
-            session_id: only extract events of this session; omit for recent all.
-            limit: number of recent raw events to extract (default 100).
-            promote: run promotion on extracted candidates (default False).
+            session_id: 仅提取该会话的事件；缺省提取最近全部。
+            limit: 提取的最近原始事件数，默认 100。
+            promote: 是否对候选直接晋升，默认 False。
         """
         runtime_server = server.app_runtime
         assert runtime_server is not None, "app_runtime required for memory extract"
-        agent = runtime_server.agent_registry.get_agent(agent_id)
+        agent = runtime_server.agent_registry.get_agent(_agent_id())
         runtime = getattr(agent, "_memory_runtime", None)
         service = getattr(runtime, "service", None) if runtime else None
         if service is None:
@@ -479,7 +652,9 @@ def build_memory_mcp(server: OctopServer, agent_id: str) -> FastMCP:
             "session_id": eff_session,
             "events_considered": result.get("events_considered", 0),
             "candidates": result.get("candidates", 0),
-            "promoted": result.get("promoted", 0) if isinstance(result.get("promotion"), dict) else 0,
+            "promoted": result.get("promoted", 0)
+            if isinstance(result.get("promotion"), dict)
+            else 0,
             "error": result.get("failure_reason"),
         }
 
@@ -488,14 +663,13 @@ def build_memory_mcp(server: OctopServer, agent_id: str) -> FastMCP:
         candidate_ids: list[str],
         importance: str | None = None,
     ) -> dict[str, Any]:
-        """**审核晋升候选**（L1 → L2）：确认候选为原子记忆。
+        """**审核晋升候选**：把 L1 候选晋升为 L2 原子记忆。
 
-        对指定候选执行 5 项晋升检查（规则路径），通过则写入 L2 atom，
-        记录 journal。用于人工审核 / 外部调度晋升。
+        对指定候选执行 5 项晋升检查（规则路径），通过则写入原子并记录 journal。
 
         Args:
-            candidate_ids: candidate ids to promote (from memory_candidates).
-            importance: override importance (low/medium/high); default keep.
+            candidate_ids: 要晋升的候选 id 列表（来自 ``memory_candidates``）。
+            importance: 覆盖重要性（low/medium/high），默认保留。
         """
         memory = _memory()
         candidates = memory.list_candidates(limit=1000)
@@ -514,11 +688,11 @@ def build_memory_mcp(server: OctopServer, agent_id: str) -> FastMCP:
         candidate_id: str,
         reason: str = "rejected by external caller",
     ) -> dict[str, Any]:
-        """**拒绝候选**：标记 rejected + 原因，不进原子层（记录 journal 可审计）。
+        """**拒绝候选**：标记候选为 rejected 并写入原因（不进原子层，可审计）。
 
         Args:
-            candidate_id: candidate id to reject.
-            reason: rejection reason.
+            candidate_id: 候选 id。
+            reason: 拒绝原因，默认 "rejected by external caller"。
         """
         memory = _memory()
 
@@ -535,19 +709,19 @@ def build_memory_mcp(server: OctopServer, agent_id: str) -> FastMCP:
     return mcp
 
 
-def _trigger_extract(server: OctopServer, agent_id: str, session_id: str | None) -> bool:
+def _trigger_extract(server: OctopServer, session_id: str | None) -> bool:
     """Best-effort: asynchronously trigger the agent's memory extraction.
 
-    Internal-network enhancement (not part of the community PR): raw events
-    written by MCP capture are not in the harness-agent extractor's tracked
-    sessions, so they would never be distilled into atoms. Reuse the agent's
-    in-process ``MemoryService`` (with the agent's configured extraction LLM)
-    via ``agent._memory_runtime.service`` (no public entrypoint; best-effort).
-    Returns whether an extract task was scheduled.
+    Raw events written by MCP capture are not in the harness-agent extractor's
+    tracked sessions, so they would never be distilled into atoms. Reuse the
+    agent's in-process ``MemoryService`` (with the agent's configured extraction
+    LLM) via ``agent._memory_runtime.service`` (no public entrypoint;
+    best-effort). Returns whether an extract task was scheduled.
     """
     import asyncio
 
-    if not session_id:
+    agent_id = _current_agent_id.get()
+    if not session_id or not agent_id:
         return False
     try:
         runtime_server = server.app_runtime
@@ -568,9 +742,7 @@ def _trigger_extract(server: OctopServer, agent_id: str, session_id: str | None)
                     regen_pages=True,
                 )
             except Exception:
-                logger.warning(
-                    "memory extract failed for session %s", session_id, exc_info=True
-                )
+                logger.warning("memory extract failed for session %s", session_id, exc_info=True)
 
         asyncio.create_task(_extract())
         return True
@@ -596,7 +768,9 @@ class _TokenAuthMiddleware:
             await self._app(scope, receive, send)
             return
 
-        headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])}
+        headers = {
+            k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])
+        }
         auth = headers.get("authorization", "")
         provided = auth[7:].strip() if auth.startswith("Bearer ") else ""
         if not provided:
@@ -604,14 +778,16 @@ class _TokenAuthMiddleware:
 
         if provided != self._token:
             body = b'{"error":"unauthorized"}'
-            await send({
-                "type": "http.response.start",
-                "status": 401,
-                "headers": [
-                    (b"content-type", b"application/json"),
-                    (b"content-length", str(len(body)).encode()),
-                ],
-            })
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 401,
+                    "headers": [
+                        (b"content-type", b"application/json"),
+                        (b"content-length", str(len(body)).encode()),
+                    ],
+                }
+            )
             await send({"type": "http.response.body", "body": body})
             return
 
@@ -619,44 +795,58 @@ class _TokenAuthMiddleware:
 
 
 class _AgentRouter:
-    """ASGI dispatcher routing to the per-expert MCP app by ``X-Octop-Agent-Id`` header."""
+    """ASGI dispatcher validating ``X-Octop-Agent-Id`` against the agent repo and
+    forwarding to the single shared memory MCP app.
 
-    def __init__(self, mcp_apps: dict[str, Any]) -> None:
-        self._mcp_apps = mcp_apps
+    The agent set is NOT snapshotted at startup: every request is checked against
+    the agent repo (existence + ``enabled``), so agents created or disabled after
+    process start take effect immediately (no restart required).
+    """
+
+    def __init__(self, app: Any, server: OctopServer) -> None:
+        self._app = app
+        self._server = server
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
         if scope.get("type") != "http":
             return  # lifespan is wired into the host FastAPI manually; http only here
 
-        headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])}
+        headers = {
+            k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])
+        }
         agent_id = headers.get("x-octop-agent-id", "").strip()
-        target = self._mcp_apps.get(agent_id)
-        if target is None:
+        services = self._server.services
+        row = services.agent_repo.get(agent_id) if (services is not None and agent_id) else None
+        if row is None or not row.enabled:
             body = b'{"error":"missing or unknown agent_id (X-Octop-Agent-Id)"}'
-            await send({
-                "type": "http.response.start",
-                "status": 404,
-                "headers": [
-                    (b"content-type", b"application/json"),
-                    (b"content-length", str(len(body)).encode()),
-                ],
-            })
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 404,
+                    "headers": [
+                        (b"content-type", b"application/json"),
+                        (b"content-length", str(len(body)).encode()),
+                    ],
+                }
+            )
             await send({"type": "http.response.body", "body": body})
             return
-        # 把调用者 user id 写入 contextvar，供工具读取（stateless HTTP 下
-        # mcp SDK 不提供 ctx.request_context）。
+        # 把本次请求绑定的 expert 与调用者 user id 写入 contextvar，供工具读取
+        # （stateless HTTP 下 mcp SDK 不提供 ctx.request_context）。
+        agent_cv = _current_agent_id.set(agent_id)
         user = headers.get("x-octop-user-id", "").strip()
         token_cv = _current_caller_user.set(user)
         try:
-            await target(scope, receive, send)
+            await self._app(scope, receive, send)
         finally:
             _current_caller_user.reset(token_cv)
+            _current_agent_id.reset(agent_cv)
 
 
 def mount_memory_mcp(app: Any, server: OctopServer) -> list[Any]:
     """Mount the memory MCP endpoint at ``/mcp/memory``; the expert is selected
-    per connection via the ``X-Octop-Agent-Id`` header (one connection binds one
-    expert; the URL stays uniform and does not leak expert ids).
+    per request via the ``X-Octop-Agent-Id`` header (validated at request time;
+    the URL stays uniform and does not leak expert ids).
 
     Does not mount when ``OCTOP_MEMORY_MCP_TOKEN`` is unset (fail-closed).
     Returns the session managers that must be initialized in the host FastAPI
@@ -666,18 +856,21 @@ def mount_memory_mcp(app: Any, server: OctopServer) -> list[Any]:
     if token is None:
         return []
 
-    managers: list[Any] = []
-    mcp_apps: dict[str, Any] = {}
     services = server.services
     assert services is not None, "server.services required for memory MCP mount"
-    rows = services.agent_repo.list_all(include_disabled=False)
-    for row in rows:
-        agent_id = row.agent_id
-        mcp = build_memory_mcp(server, agent_id)
-        mcp_apps[agent_id] = mcp.streamable_http_app()
-        managers.append(mcp._session_manager)
+    mcp = build_memory_mcp(server)
+    # IMPORTANT: _session_manager is created lazily by streamable_http_app().
+    # Read it only AFTER building the ASGI app and drop None entries — in
+    # stateless HTTP mode there is no session manager to keep alive, and reading
+    # mcp._session_manager before streamable_http_app() yields None, which then
+    # crashes the host FastAPI lifespan with "NoneType has no attribute 'run'".
+    streamable_app = mcp.streamable_http_app()
+    managers = [mgr for mgr in (mcp._session_manager,) if mgr is not None]
 
-    app.mount("/mcp/memory", _TokenAuthMiddleware(_AgentRouter(mcp_apps), token))
+    app.mount(
+        "/mcp/memory",
+        _TokenAuthMiddleware(_AgentRouter(streamable_app, server), token),
+    )
     return managers
 
 
