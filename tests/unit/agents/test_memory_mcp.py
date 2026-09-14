@@ -99,13 +99,62 @@ def test_memory_recall_uses_full_pipeline(fake_memory, monkeypatch, bind_agent):
     fake_result = mock.MagicMock()
     fake_result.snippets = [_Snippet()]
     fake_result.rendered = "markdown"
-    monkeypatch.setattr(_recall, "recall_for_prompt", lambda m, q, limit: fake_result)
+    monkeypatch.setattr(_recall, "recall_for_prompt", lambda m, q, **kw: fake_result)
 
     mcp = mm.build_memory_mcp(mock.MagicMock())
     result = _tools(mcp)["memory_recall"].fn(query="billing-migration", limit=3)
     assert result["count"] == 1
     assert result["memories"][0]["text"] == "billing-migration is the local clone"
     assert result["rendered"] == "markdown"
+
+
+def test_memory_recall_forwards_session_and_thread(fake_memory, monkeypatch, bind_agent):
+    """Hook callers can scope recall to a session/thread (echo guard + co-reference)."""
+    import harness_memory.pipeline.recall as _recall
+
+    captured = {}
+
+    def _fake(memory, query, **kwargs):
+        captured["memory"] = memory
+        captured["query"] = query
+        captured.update(kwargs)
+        result = mock.MagicMock()
+        result.snippets = []
+        result.rendered = ""
+        return result
+
+    monkeypatch.setattr(_recall, "recall_for_prompt", _fake)
+    mcp = mm.build_memory_mcp(mock.MagicMock())
+    _tools(mcp)["memory_recall"].fn(
+        query="那个项目",
+        limit=4,
+        session_id="sess-1",
+        thread_id="thr-1",
+    )
+    assert captured["memory"] is fake_memory
+    assert captured["query"] == "那个项目"
+    assert captured["session_id"] == "sess-1"
+    assert captured["thread_id"] == "thr-1"
+    assert captured["limit"] == 4
+
+
+def test_memory_recall_without_scope_passes_none(fake_memory, monkeypatch, bind_agent):
+    import harness_memory.pipeline.recall as _recall
+
+    captured = {}
+
+    def _fake(memory, query, **kwargs):
+        captured.update(kwargs)
+        result = mock.MagicMock()
+        result.snippets = []
+        result.rendered = ""
+        return result
+
+    monkeypatch.setattr(_recall, "recall_for_prompt", _fake)
+    mcp = mm.build_memory_mcp(mock.MagicMock())
+    _tools(mcp)["memory_recall"].fn(query="q")
+    assert captured["session_id"] is None
+    assert captured["thread_id"] is None
 
 
 def test_memory_save_goes_store(fake_memory, bind_agent):
@@ -534,3 +583,28 @@ def test_write_without_caller_keeps_content(fake_memory, bind_agent):
     mcp = mm.build_memory_mcp(mock.MagicMock())
     _tools(mcp)["memory_save"].fn(content="no sender", source="coding-agent")
     assert fake_memory.store.call_args.args[0] == "no sender"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "[memory] Earlier in this workspace, related to your question:\n- [atom] x",
+        "结论见下：\n## Memory Recall\n- [atom] y\n[/memory]",
+    ],
+)
+def test_memory_capture_drops_recall_echo(fake_memory, bind_agent, content):
+    """Injected recall blocks are not captured back (mirrors skip_memory_echo)."""
+    mcp = mm.build_memory_mcp(mock.MagicMock())
+    result = _tools(mcp)["memory_capture"].fn(content=content, source="hook")
+    assert result["recorded"] is False
+    assert result["skipped"] == "recall_echo"
+    assert "recall_echo" in result["skipped"]
+    fake_memory.add_raw.assert_not_called()
+
+
+def test_memory_capture_still_records_normal_content(fake_memory, bind_agent, bind_user):
+    """The echo guard must not block ordinary captures."""
+    mcp = mm.build_memory_mcp(mock.MagicMock())
+    result = _tools(mcp)["memory_capture"].fn(content="接口先不要动", source="hook")
+    assert result["recorded"] is True
+    assert fake_memory.add_raw.call_args.args[0] == "alice说：接口先不要动"

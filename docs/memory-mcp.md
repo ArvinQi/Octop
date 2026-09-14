@@ -51,7 +51,7 @@
 
 | 工具 | 参数 | 说明 |
 |---|---|---|
-| `memory_recall` | `query: str`, `limit: int = 5`, `user?: str` | **读入口首选**。跑完整召回管线（分词 → 路由 → FTS → 重排 → 去重），返回结构化片段 + 可直接注入 system prompt 的 markdown（`rendered`）。L2 原子优先，主题页标题并入 atom 命中，L0 原始事件仅兜底 |
+| `memory_recall` | `query: str`, `limit: int = 5`, `session_id?: str`, `thread_id?: str`, `user?: str` | **读入口首选**。跑完整召回管线（分词 → 路由 → FTS → 重排 → 去重），返回结构化片段 + 可直接注入 system prompt 的 markdown（`rendered`）。L2 原子优先，主题页标题并入 atom 命中，L0 原始事件仅兜底。**自动注入（hook）场景建议传 `session_id`**：管线会据此把本会话的 raw 排除，避免"注入 → 被记录 → 下轮又召回"的回声；`thread_id` 则启用共指消解（"那个项目" 靠该线程的 active-entity stack） |
 | `memory_search` | `query: str`, `max_results: int = 5`, `corpus: str = "all"` | 同一套召回管线，但**不渲染 markdown**，而是给每条命中一个虚拟 `path`，交给 `memory_get` 下钻。`corpus`：`all`/`memory`（原子+原始事件同管线）、`atom`（只要 L2 原子）、`raw`（直接走 L0 全文检索，不受"有原子命中就丢 raw"的兜底影响） |
 | `memory_get` | `path: str`, `start?: int`, `lines?: int` | 把命中路径解析成完整 markdown。支持 `atom/<atom_id>.md`、`page/<entity_id>.md`、`raw/<YYYY-MM-DD>/<event_id>.md`；长内容用 `start`/`lines` 分页（1-based）。路径非法或过期时返回 `{error, hint}` 而不是抛栈 |
 | `memory_raws` | `query?: str`, `session_id?: str`, `host?: str`, `user?: str`, `limit: int = 50` | **原始事件（证据源）**。`query` 走全文检索（写入后立即可见，提取前也能查），其余字段做结构化过滤，按时间倒序返回 |
@@ -79,6 +79,11 @@
 
 `memory_capture` 是**幂等**的：同一 `session_id` + 同一内容重复写入时不会产生重复 L0 事件，
 返回里带 `duplicate: true` 并复用已有 `event_id`（下游提取因此可以反复重跑）。
+
+它还有**回声保护**：内容里带 `memory_recall` 的注入标记（`[memory] Earlier in this workspace` /
+`## Memory Recall`）时**不写入**，直接返回 `{recorded: false, skipped: "recall_echo"}`。
+原因：MCP 写路径直接调 `Memory.add_raw`，绕过了 `MemoryRuntime.capture` 的 `skip_memory_echo`；
+不补这层，hook 注入的召回块会被当作新事件采集，形成"注入 → 采集 → 再召回"的放大环。
 
 ### 2.3 提取与审核流水线（4 个）
 
@@ -480,6 +485,9 @@ This preset auto-reads and auto-writes the octop-memory expert store so durable 
 - **capture 之后 recall 无结果属预期**：内容还在 L0，需要经提取晋升成原子才会被召回；
   想立刻看到请用 `memory_raws` 或 `memory_search(corpus="raw")`。
 - **capture 幂等**：同 `session_id` + 同内容不重复落库（见 §2.2）。
+- **召回回声有双向保护**：写入侧 `memory_capture` 丢弃带召回标记的内容（`skipped=recall_echo`）；
+  读取侧建议 hook 给 `memory_recall` 传与 capture 一致的 `session_id`，把本会话的 raw 排除。
+  两侧都做，才不会出现"注入 → 采集 → 再召回"的放大环（§4.3 / §4.4 的自动召回就是这个场景）。
 - **召回是专家级共享**，不做按人隔离；按发送者定位依赖正文里的 `<user>说：` 前缀 + 全文检索。
 - **错误形态**：`memory_get` 的坏路径返回 `{error, hint}`；`memory_search` 的非法 `corpus`、
   `memory_candidates` 的非法 `status` 直接报错（参数错误不会被静默吞掉）。

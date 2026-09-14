@@ -26,12 +26,19 @@ Read surface (three tools, same storage as the in-process ``memory_search`` /
 
 * ``memory_recall`` -> ``recall_for_prompt``: ranked, prompt-injectable text.
   L2 atoms first; ``page`` headlines are folded into atom hits; L0 raw is only
-  a fallback (dropped as soon as any atom matches).
+  a fallback (dropped as soon as any atom matches). Takes ``session_id`` /
+  ``thread_id`` so an auto-inject hook can exclude the current session's raw and
+  use the thread's active-entity stack for co-reference.
 * ``memory_search`` -> ``MemoryRuntime.memory_search`` (``corpus=raw`` uses
   ``Memory.search_raw``): the same ranking, returned as hits that carry a
   virtual ``path`` instead of rendered markdown.
 * ``memory_get`` -> ``MemoryRuntime.memory_get``: resolve that path to the full
   markdown (``atom/<id>.md`` / ``page/<entity_id>.md`` / ``raw/<date>/<id>.md``).
+
+Recall echo guard: ``memory_capture`` drops content carrying a recall marker
+(``_RECALL_ECHO_MARKERS``), the same rule ``MemoryRuntime.capture`` applies via
+``skip_memory_echo`` — the MCP write path calls ``Memory.add_raw`` directly and
+would otherwise capture a hook's own injected recall block as a new event.
 
 Sender attribution: ``X-Octop-User-Id`` identifies the caller, and every write
 (``memory_capture`` / ``memory_save`` / ``memory_update``) prefixes the content
@@ -72,6 +79,17 @@ _SEARCH_CORPORA: frozenset[str] = frozenset({"all", "memory", "atom", "raw"})
 recall pipeline; ``all``/``memory`` are the same pipeline without a filter."""
 
 _SNIPPET_CHARS = 200
+
+_RECALL_ECHO_MARKERS: tuple[str, ...] = (
+    "## Memory Recall",
+    "[memory] Earlier in this workspace",
+)
+"""Markers ``recall_for_prompt`` puts into its rendered block (legacy + current).
+
+``MemoryRuntime.capture`` drops events containing these (``skip_memory_echo``) so the
+host's own injection cannot be captured back as a new memory. The MCP write path calls
+``Memory.add_raw`` directly and therefore has to apply the same rule itself.
+"""
 
 
 def _open_memory(server: OctopServer, agent_id: str) -> Any:
@@ -118,6 +136,16 @@ def _snippet(text: str) -> str:
     """Cap a raw event body so ``memory_search`` hits stay small (``memory_get`` reads the rest)."""
     body = (text or "").strip()
     return body if len(body) <= _SNIPPET_CHARS else body[: _SNIPPET_CHARS - 1].rstrip() + "…"
+
+
+def _is_recall_echo(content: str) -> bool:
+    """True when ``content`` is our own recall block coming back as a new event.
+
+    Mirrors ``MemoryRuntime.capture``'s anti-feedback rule; without it a hook that
+    injects ``memory_recall`` output and then captures the turn via MCP would feed the
+    injected block back in, and each round would recall (and re-capture) more of it.
+    """
+    return any(marker in content for marker in _RECALL_ECHO_MARKERS)
 
 
 def _attributed(content: str, caller: str) -> str:
@@ -223,6 +251,8 @@ def build_memory_mcp(server: OctopServer) -> FastMCP:
     def memory_recall(
         query: str,
         limit: int = 5,
+        session_id: str | None = None,
+        thread_id: str | None = None,
         user: str | None = None,
         ctx: Context | None = None,  # type: ignore[type-arg]
     ) -> dict[str, Any]:
@@ -230,6 +260,8 @@ def build_memory_mcp(server: OctopServer) -> FastMCP:
 
         每次对话/任务开始前先调一次。运行完整召回管线（分词 → 路由 → FTS →
         重排 → 去重 → token 预算），返回结构化片段 + 可直接注入 system prompt 的 markdown。
+        自动注入（hook）场景建议传 ``session_id``：管线会据此把**本会话**的 raw 排除，
+        避免"注入 → 被记录 → 下轮又召回"的回声。
 
         三个读工具怎么选：
         - 只想把相关背景拉进上下文 → 用本工具（一次调用，``rendered`` 直接可注入）。
@@ -245,6 +277,10 @@ def build_memory_mcp(server: OctopServer) -> FastMCP:
         Args:
             query: 自然语言问题/关键词，整句传入（内部对中文做 n-gram 分词）。
             limit: 最多返回片段数，默认 5。
+            session_id: 可选，当前会话 id。用于把本会话的 raw 从召回里排除（防回声）；
+                与 ``memory_capture`` 传入的 ``session_id`` 一致才生效。
+            thread_id: 可选，会话线程 id。用于共指消解（"那个项目" 靠该线程的
+                active-entity stack）并把命中写回实体栈；不传则只做普通检索。
             user: 可选调用者 id（覆盖 ``X-Octop-User-Id`` 头）。
             ctx: MCP 注入的上下文（读取 ``X-Octop-User-Id`` 头）。
         """
@@ -252,7 +288,13 @@ def build_memory_mcp(server: OctopServer) -> FastMCP:
 
         caller = user or _caller_user(ctx)
         memory = _memory()
-        result = recall_for_prompt(memory, query, limit=limit)
+        result = recall_for_prompt(
+            memory,
+            query,
+            thread_id=thread_id,
+            session_id=session_id,
+            limit=limit,
+        )
         return {
             "memories": [
                 {
@@ -416,14 +458,31 @@ def build_memory_mcp(server: OctopServer) -> FastMCP:
         原子正文，既能被 FTS 直接搜到，也能在召回时一眼看出是谁说的——**不要**自己再
         写一遍名字。
 
+        回声保护：内容里带 ``memory_recall`` 注入标记（``[memory] Earlier in this
+        workspace`` / ``## Memory Recall``）时**不写入**，返回 ``skipped=recall_echo``。
+        拼进 prompt 的召回块被整轮回采会形成"注入 → 采集 → 再召回"的放大环，故直接丢弃。
+
         Args:
             content: 原始对话/事件内容（不含发送者前缀）。
             source: 谁记录的，用于追溯。
             session_id: 可选会话 id，用于提取分组；缺省派生为 ``ext:{source}:{user}``。
+                传了之后，``memory_recall`` 用同一个 id 就能把本会话的 raw 排除（防回声）。
             user: 可选调用者 id（覆盖 ``X-Octop-User-Id`` 头）。
             ctx: MCP 注入的上下文（读取 ``X-Octop-User-Id`` 头）。
         """
         caller = user or _caller_user(ctx)
+        if _is_recall_echo(content):
+            logger.info("memory_capture: dropped recall echo for agent %s", _agent_id())
+            return {
+                "recorded": False,
+                "skipped": "recall_echo",
+                "reason": (
+                    "content contains a recall injection marker "
+                    f"({_RECALL_ECHO_MARKERS[1]!r} / {_RECALL_ECHO_MARKERS[0]!r}); "
+                    "dropped so our own recall output is not captured as a new event"
+                ),
+                "user": caller or None,
+            }
         effective_session = session_id or _derive_session(source, caller)
         memory = _memory()
         stored_content = _attributed(content, caller)
